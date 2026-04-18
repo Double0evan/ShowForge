@@ -1,0 +1,22 @@
+{
+  "discord": {
+    "token": "PUT_TOKEN_IN_Discord/.env",
+    "guild_id": 0,
+    "catalog_sfw_channel_id": 0,
+    "catalog_nsfw_channel_id": 0,
+    "claims_sfw_channel_id": 0,
+    "claims_nsfw_channel_id": 0,
+    "verified_role_id": 0,
+    "verify_channel_id": 0,
+    "upload_thread_raw_sfw": 0,
+    "upload_thread_wm_sfw": 0,
+    "upload_thread_raw_nsfw": 0,
+    "upload_thread_wm_nsfw": 0
+  },
+  "watcher": {
+    "parent_dir": "F:/YourShowFolder",
+    "wm_template_sfw": "F:/YourShowFolder/templates/sfw.png",
+    "wm_template_nsfw": "F:/YourShowFolder/templates/nsfw.png",
+    "auto_publish": 0
+  }
+}
