@@ -320,8 +320,55 @@ def ui_claims(request: Request):
     ctx    = _base_ctx("claims", request)
     active = shows.get_active()
     if active:
-        ctx["claims"] = list_claims(active.db_path, include_removed=False)
+        claims = list_claims(active.db_path, include_removed=False)
+        for c in claims:
+            code   = c["item_code"]
+            rating = "nsfw" if code.startswith("N") else "sfw"
+            media  = get_media(active.db_path, code, "watermarked", rating)
+            c["preview_url"] = media["attachment_url"] if media else None
+        ctx["claims"] = claims
     return templates.TemplateResponse("index.html", ctx)
+
+
+@router.post("/ui/claims/summary")
+async def ui_claims_summary(rating: str = Form(...)):
+    """
+    Delete all messages in the claims archival thread for the given rating,
+    then post a sorted summary grouped by user with RAW images attached.
+    """
+    active = require_active_show()
+    rating = rating.strip().lower()
+
+    try:
+        r = requests.post(f"{BOT_API}/claims/summary", json={"rating": rating}, timeout=120)
+        return r.json()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@router.post("/ui/claims/summary")
+async def ui_claims_summary(rating: str = Form(...)):
+    """
+    Delete all messages in the claims archival thread for the given rating,
+    then post a sorted summary grouped by user with RAW images attached.
+    """
+    rating = rating.strip().lower()
+    try:
+        r = requests.post(f"{BOT_API}/claims/summary", json={"rating": rating}, timeout=120)
+        return r.json()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@router.post("/ui/claims/summary")
+async def ui_claims_summary(rating: str = Form(...)):
+    """Delete all messages in the claims thread, post sorted summary with RAW images."""
+    rating = rating.strip().lower()
+    try:
+        r = requests.post(f"{BOT_API}/claims/summary", json={"rating": rating}, timeout=120)
+        return r.json()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 @router.post("/ui/claims/remove")

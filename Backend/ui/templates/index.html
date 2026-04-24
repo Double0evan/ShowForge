@@ -383,7 +383,14 @@ input[type=checkbox]{accent-color:var(--blue);width:14px;height:14px;cursor:poin
 {% if page == 'claims' %}
 <div class="topbar">
   <h1 class="page-title">Claims</h1>
-  <div class="topbar-right"><span style="font-size:11px;color:var(--dim);font-family:var(--mono)">{{ claims|length if claims else 0 }} active</span></div>
+  <div class="topbar-right">
+    <input type="text" id="claims-search" placeholder="Search name or item…"
+      style="background:var(--s2);border:1px solid var(--border2);color:var(--text);padding:6px 12px;border-radius:7px;font-size:12px;outline:none;width:200px"
+      oninput="claimsFilter()">
+    <button class="btn btn-ghost btn-sm" onclick="postSummary('sfw')" title="Post sorted summary to SFW claims thread">📋 SFW Summary</button>
+    <button class="btn btn-ghost btn-sm" onclick="postSummary('nsfw')" title="Post sorted summary to NSFW claims thread">📋 NSFW Summary</button>
+    <span style="font-size:11px;color:var(--dim);font-family:var(--mono)" id="claims-count">{{ claims|length if claims else 0 }} active</span>
+  </div>
 </div>
 <div class="content">
   {% if claims %}
@@ -392,15 +399,37 @@ input[type=checkbox]{accent-color:var(--blue);width:14px;height:14px;cursor:poin
     <div class="stat-card"><div class="stat-label">Total Ever</div><div class="stat-value blue">{{ claims|length }}</div></div>
   </div>
   <div class="table-wrap">
-    <table>
-      <thead><tr><th>Item</th><th>User</th><th>Source</th><th>Claimed At</th><th style="text-align:right">Actions</th></tr></thead>
-      <tbody>
+    <table id="claims-table">
+      <thead><tr>
+        <th style="width:56px"></th>
+        <th class="sortable" onclick="claimsSort('item')" style="cursor:pointer;user-select:none">Item <span id="sort-item"></span></th>
+        <th class="sortable" onclick="claimsSort('user')" style="cursor:pointer;user-select:none">User <span id="sort-user"></span></th>
+        <th>Source</th>
+        <th class="sortable" onclick="claimsSort('note')" style="cursor:pointer;user-select:none">Note <span id="sort-note"></span></th>
+        <th class="sortable" onclick="claimsSort('date')" style="cursor:pointer;user-select:none">Claimed At <span id="sort-date">↓</span></th>
+        <th style="text-align:right">Actions</th>
+      </tr></thead>
+      <tbody id="claims-tbody">
       {% for c in claims %}
       {% if not c.removed_at %}
-      <tr id="claim-{{ c.item_code }}">
+      <tr id="claim-{{ c.item_code }}"
+        data-item="{{ c.item_code }}"
+        data-user="{{ c.user_display_name | lower }}"
+        data-note="{{ (c.voucher_note or '') | lower }}"
+        data-date="{{ c.created_at or '' }}">
+        <td>
+          <div class="img-box">
+            {% if c.preview_url %}
+              <img src="{{ c.preview_url }}" onerror="this.style.display='none'">
+            {% endif %}
+          </div>
+        </td>
         <td><span class="code">{{ c.item_code }}</span></td>
         <td><span style="font-weight:500">{{ c.user_display_name }}</span><span style="color:var(--dim);font-size:11px;margin-left:5px">#{{ c.user_id }}</span></td>
         <td><span style="color:var(--dim);font-size:12px">{{ c.source }}</span></td>
+        <td style="font-size:12px">
+          {% if c.voucher_note %}<span style="color:var(--text)">{{ c.voucher_note }}</span>{% else %}<span style="color:var(--dim)">—</span>{% endif %}
+        </td>
         <td style="color:var(--dim);font-family:var(--mono);font-size:11px">{{ c.created_at[:16].replace('T',' ') if c.created_at else '—' }}</td>
         <td style="text-align:right">
           <div style="display:flex;justify-content:flex-end;gap:5px">
@@ -1016,6 +1045,60 @@ setInterval(pollInventory,5000);
 {% endif %}
 
 // ── Claims ────────────────────────────────────────────────────────────────────
+async function postSummary(rating) {
+  if (!confirm('This will DELETE all messages in the ' + rating.toUpperCase() + ' claims thread and post a sorted summary. Continue?')) return;
+  const btn = [...document.querySelectorAll('button')].find(b => b.textContent.includes(rating.toUpperCase() + ' Summary'));
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Posting…'; }
+  const fd = new FormData(); fd.append('rating', rating);
+  try {
+    const d = await fetch('/ui/claims/summary', {method:'POST', body:fd}).then(r=>r.json());
+    if (d.ok) toast('✓ ' + rating.toUpperCase() + ' summary posted (' + (d.posted||0) + ' claims)');
+    else toast(d.error || 'Failed', 'err');
+  } catch(e) { toast('Network error', 'err'); }
+  if (btn) { btn.disabled = false; btn.textContent = '📋 ' + rating.toUpperCase() + ' Summary'; }
+}
+
+let _claimSortCol = 'date', _claimSortAsc = false;
+
+function claimsFilter() {
+  const q    = (document.getElementById('claims-search')?.value || '').toLowerCase().trim();
+  const rows = document.querySelectorAll('#claims-tbody tr');
+  let vis = 0;
+  rows.forEach(r => {
+    const item = (r.dataset.item || '').toLowerCase();
+    const user = (r.dataset.user || '').toLowerCase();
+    const note = (r.dataset.note || '').toLowerCase();
+    const show = !q || item.includes(q) || user.includes(q) || note.includes(q);
+    r.style.display = show ? '' : 'none';
+    if (show) vis++;
+  });
+  const cnt = document.getElementById('claims-count');
+  if (cnt) cnt.textContent = vis + ' active';
+}
+
+function claimsSort(col) {
+  if (_claimSortCol === col) { _claimSortAsc = !_claimSortAsc; }
+  else { _claimSortCol = col; _claimSortAsc = col !== 'date'; }
+
+  // Update indicators
+  ['item','user','note','date'].forEach(c => {
+    const el = document.getElementById('sort-'+c);
+    if (!el) return;
+    if (c === col) el.textContent = _claimSortAsc ? '↑' : '↓';
+    else el.textContent = '';
+  });
+
+  const tbody = document.getElementById('claims-tbody');
+  if (!tbody) return;
+  const rows = [...tbody.querySelectorAll('tr')];
+  rows.sort((a, b) => {
+    let av = a.dataset[col] || '', bv = b.dataset[col] || '';
+    const cmp = av.localeCompare(bv, undefined, {numeric: true});
+    return _claimSortAsc ? cmp : -cmp;
+  });
+  rows.forEach(r => tbody.appendChild(r));
+}
+
 async function removeClaim(code,refund){
   if(!confirm(refund?'Remove claim + refund voucher?':'Remove WITHOUT refunding?'))return;
   const fd=new FormData();fd.append('item_code',code);fd.append('refund',refund);

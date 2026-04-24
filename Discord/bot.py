@@ -175,12 +175,15 @@ async def get_claims_thread(interaction: discord.Interaction, rating: str) -> di
         return None
 
 
-async def post_raw_to_thread(thread, *, item_code, claimer_name, raw_url, filename):
+async def post_raw_to_thread(thread, *, item_code, claimer_name, raw_url, filename, voucher_note=None):
     resp  = requests.get(raw_url, timeout=25)
     resp.raise_for_status()
     fn    = filename or f"{item_code}.jpg"
     file  = discord.File(fp=io.BytesIO(resp.content), filename=fn)
-    embed = discord.Embed(title=f"RAW: {item_code}", description=f"Claimed by **{claimer_name}**")
+    lines = [claimer_name]
+    if voucher_note:
+        lines.append(voucher_note)
+    embed = discord.Embed(title=item_code, description="\n".join(lines))
     embed.set_image(url=f"attachment://{fn}")
     await thread.send(embed=embed, file=file)
 
@@ -242,9 +245,25 @@ async def on_interaction(interaction: discord.Interaction):
             pass
         if thread and raw and raw.get("attachment_url"):
             try:
+                # Fetch the voucher note so we can show which credit was spent
+                voucher_note = None
+                try:
+                    vr = requests.get(
+                        f"{BACKEND_BASE_URL}/vouchers/ledger",
+                        params={"user_id": internal_user_id},
+                        timeout=5,
+                    )
+                    rows = vr.json().get("rows", [])
+                    # Find the most recent spend row (-1 delta) with a note
+                    spend = next((r for r in reversed(rows) if r.get("delta") == -1 and r.get("note")), None)
+                    if spend:
+                        voucher_note = spend["note"]
+                except Exception:
+                    pass
                 await post_raw_to_thread(
                     thread, item_code=item_code, claimer_name=display_name,
                     raw_url=raw["attachment_url"], filename=raw.get("filename"),
+                    voucher_note=voucher_note,
                 )
             except Exception:
                 pass
@@ -479,6 +498,112 @@ def api_publish(item_code: str, post_mode: str = "claim"):
 
 
 # ── on_ready ──────────────────────────────────────────────────────────────────
+
+@app.post("/claims/summary")
+def api_claims_summary(payload: dict):
+    """
+    Delete all messages in the claims archival thread for the given rating,
+    then post a sorted summary grouped by user with one message per claim.
+    Sync endpoint — runs in threadpool so run_coroutine_threadsafe works.
+    """
+    import asyncio
+    from Core.show_service import require_active_show
+    from Core.claim_service import list_claims
+    from Core.media_service import get_media
+
+    rating = (payload.get("rating") or "nsfw").lower()
+
+    if not _discord_loop:
+        return JSONResponse({"ok": False, "error": "Discord not ready"}, status_code=503)
+
+    # Get thread ID from show settings
+    try:
+        from Core.show_settings_service import get_setting
+        active     = require_active_show()
+        thread_key = "claims_thread_nsfw" if rating == "nsfw" else "claims_thread_sfw"
+        thread_id  = get_setting(active.db_path, thread_key)
+        if not thread_id:
+            return {"ok": False, "error": f"No {rating.upper()} claims thread set — create a new show first"}
+        thread_id = int(thread_id)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+    # Fetch and group claims by user
+    try:
+        claims = list_claims(active.db_path, include_removed=False)
+        # Filter by rating prefix
+        prefix  = "N" if rating == "nsfw" else "S"
+        claims  = [c for c in claims if c["item_code"].startswith(prefix)]
+        if not claims:
+            return {"ok": False, "error": f"No active {rating.upper()} claims found"}
+
+        # Sort: by user name then item code
+        claims.sort(key=lambda c: (c["user_display_name"].lower(), c["item_code"]))
+
+        # Attach media URLs
+        for c in claims:
+            media = get_media(active.db_path, c["item_code"], "raw", rating)
+            c["raw_url"]  = media["attachment_url"] if media else None
+            c["raw_name"] = media["filename"] if media else f"{c['item_code']}.jpg"
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+    async def _post_summary():
+        thread = client.get_channel(thread_id) or await client.fetch_channel(thread_id)
+
+        # Unarchive if needed
+        if getattr(thread, "archived", False):
+            await thread.edit(archived=False)
+
+        # Delete all existing messages
+        async for msg in thread.history(limit=None):
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+
+        # Post header
+        await thread.send(f"📋 **SHOW SUMMARY — {rating.upper()}**")
+
+        # Group by user
+        from itertools import groupby
+        posted = 0
+        for user_name, user_claims in groupby(claims, key=lambda c: c["user_display_name"]):
+            user_claims = list(user_claims)
+            # Post user header
+            await thread.send(f"───── **{user_name}** ({len(user_claims)} claim{'s' if len(user_claims) != 1 else ''})")
+
+            for c in user_claims:
+                note    = c.get("voucher_note") or ""
+                label   = f"{c['item_code']}" + (f" — {note}" if note else "")
+
+                if c["raw_url"]:
+                    # Download and re-upload RAW so it shows inline
+                    try:
+                        resp = requests.get(c["raw_url"], timeout=20)
+                        resp.raise_for_status()
+                        file  = discord.File(fp=io.BytesIO(resp.content), filename=c["raw_name"])
+                        embed = discord.Embed(title=label, color=0x2b2d31)
+                        embed.set_image(url=f"attachment://{c['raw_name']}")
+                        await thread.send(embed=embed, file=file)
+                    except Exception:
+                        await thread.send(label)
+                else:
+                    await thread.send(label)
+
+                posted += 1
+                await asyncio.sleep(0.5)  # avoid rate limits
+
+        return posted
+
+    future = asyncio.run_coroutine_threadsafe(_post_summary(), _discord_loop)
+    try:
+        posted = future.result(timeout=300)  # 5 min timeout for large shows
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+    return {"ok": True, "posted": posted, "rating": rating}
+
 
 @client.event
 async def on_ready():
