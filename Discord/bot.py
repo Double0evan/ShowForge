@@ -50,6 +50,10 @@ UPLOAD_THREAD_RAW_SFW   = get_int_env("UPLOAD_THREAD_RAW_SFW")
 UPLOAD_THREAD_WM_SFW    = get_int_env("UPLOAD_THREAD_WM_SFW")
 UPLOAD_THREAD_RAW_NSFW  = get_int_env("UPLOAD_THREAD_RAW_NSFW")
 UPLOAD_THREAD_WM_NSFW   = get_int_env("UPLOAD_THREAD_WM_NSFW")
+CLAIM_BOT_COMMANDS_CHANNEL_ID = get_int_env("CLAIM_BOT_COMMANDS_CHANNEL_ID", 0)
+TRADE_CATEGORY_ID             = get_int_env("TRADE_CATEGORY_ID", 0)
+TRADE_ANNOUNCE_CHANNEL_ID     = get_int_env("TRADE_ANNOUNCE_CHANNEL_ID", 0)
+TRADE_LOG_CHANNEL_ID          = get_int_env("TRADE_LOG_CHANNEL_ID", 0)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -203,6 +207,21 @@ async def on_interaction(interaction: discord.Interaction):
 
     await interaction.response.defer(ephemeral=True)
 
+    # Block button claims during bin shows
+    try:
+        from Core.show_service import require_active_show
+        from Core.show_settings_service import get_setting
+        _active = require_active_show()
+        if get_setting(_active.db_path, "show_mode") == "bin":
+            await interaction.followup.send(
+                "🎯 This is a bin show — items are claimed via Whatnot auction. "
+                "Win the auction on Whatnot to claim this item.",
+                ephemeral=True,
+            )
+            return
+    except Exception:
+        pass  # no active show or setting missing — allow normal flow
+
     if not interaction.guild:
         await interaction.followup.send("This can only be used in the server.", ephemeral=True)
         return
@@ -271,6 +290,20 @@ async def on_interaction(interaction: discord.Interaction):
             await interaction.message.delete()
         except Exception:
             pass
+
+        # Open/refresh trade channel for this user
+        if TRADE_CATEGORY_ID and interaction.guild:
+            try:
+                from Trade.trade_hook import on_item_assigned_trade
+                from Core.show_service import require_active_show
+                active = require_active_show()
+                await on_item_assigned_trade(
+                    active.db_path, interaction.guild, member,
+                    TRADE_CATEGORY_ID, TRADE_ANNOUNCE_CHANNEL_ID or None,
+                )
+            except Exception as e:
+                print(f"[TRADE] on_item_assigned_trade error: {e}")
+
         await interaction.followup.send(f"✅ Claimed {item_code}", ephemeral=True)
         return
 
@@ -379,33 +412,54 @@ def api_new_show(payload: dict):
         )
         await sfw_thread.send(f"🗂️ **Show Archive:** `{show_id}` (SFW claims)")
         await nsfw_thread.send(f"🗂️ **Show Archive:** `{show_id}` (NSFW claims)")
-        return sfw_thread.id, nsfw_thread.id
+
+        # Create trade log thread if channel is configured
+        trade_log_thread_id = None
+        if TRADE_LOG_CHANNEL_ID:
+            try:
+                log_channel = guild.get_channel(TRADE_LOG_CHANNEL_ID) or await guild.fetch_channel(TRADE_LOG_CHANNEL_ID)
+                trade_log_thread = await log_channel.create_thread(
+                    name=thread_name,
+                    type=discord.ChannelType.public_thread,
+                    auto_archive_duration=10080,
+                )
+                await trade_log_thread.send(
+                    f"📝 **Trade Log — {thread_name}**\n`{show_id}`\n\nAll accepted trades will be logged here."
+                )
+                trade_log_thread_id = trade_log_thread.id
+            except Exception as e:
+                print(f"[NEW_SHOW] Could not create trade log thread: {e}")
+
+        return sfw_thread.id, nsfw_thread.id, trade_log_thread_id
 
     future = asyncio.run_coroutine_threadsafe(_create_threads(), _discord_loop)
     try:
-        sfw_id, nsfw_id = future.result(timeout=25)
+        sfw_id, nsfw_id, trade_log_id = future.result(timeout=25)
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
-    # Save thread IDs directly to the show DB — avoids an HTTP round-trip back
-    # to the backend which can fail silently under load
+    # Save thread IDs directly to the show DB
     try:
         from Core.show_service import require_active_show
         from Core.show_settings_service import set_setting
         active = require_active_show()
         set_setting(active.db_path, "claims_thread_sfw",  str(sfw_id))
         set_setting(active.db_path, "claims_thread_nsfw", str(nsfw_id))
+        if trade_log_id:
+            set_setting(active.db_path, "trade_log_thread_id", str(trade_log_id))
     except Exception as e:
-        # Fall back to HTTP if direct DB access fails
         try:
             requests.post(f"{BACKEND_BASE_URL}/shows/settings/set",
                           params={"key": "claims_thread_sfw",  "value": str(sfw_id)}, timeout=10)
             requests.post(f"{BACKEND_BASE_URL}/shows/settings/set",
                           params={"key": "claims_thread_nsfw", "value": str(nsfw_id)}, timeout=10)
+            if trade_log_id:
+                requests.post(f"{BACKEND_BASE_URL}/shows/settings/set",
+                              params={"key": "trade_log_thread_id", "value": str(trade_log_id)}, timeout=10)
         except Exception as e2:
             return JSONResponse({"ok": False, "error": f"Threads created but settings save failed: {e2}"}, status_code=500)
 
-    return {"ok": True, "thread_name": thread_name, "sfw_thread_id": sfw_id, "nsfw_thread_id": nsfw_id}
+    return {"ok": True, "thread_name": thread_name, "sfw_thread_id": sfw_id, "nsfw_thread_id": nsfw_id, "trade_log_thread_id": trade_log_id}
 
 
 # ── Watcher control endpoints ────────────────────────────────────────────────
@@ -602,7 +656,116 @@ def api_claims_summary(payload: dict):
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
+    # Post trade summary to trade log thread and archive it
+    if TRADE_LOG_CHANNEL_ID:
+        async def _post_trade_summary():
+            try:
+                from Core.show_settings_service import get_setting
+                from Core.show_service import require_active_show
+                from Trade.db.trade_db import ensure_trade_tables
+                from Core.db import db_session as _db_session
+
+                active = require_active_show()
+                thread_id_str = get_setting(active.db_path, "trade_log_thread_id")
+                if not thread_id_str:
+                    return
+
+                thread = client.get_channel(int(thread_id_str)) or await client.fetch_channel(int(thread_id_str))
+                if not thread:
+                    return
+                if getattr(thread, "archived", False):
+                    await thread.edit(archived=False)
+
+                # Query all accepted trades for this show
+                with _db_session(active.db_path) as conn:
+                    ensure_trade_tables(conn)
+                    rows = conn.execute("""
+                        SELECT o.offer_id, o.sender_user_id, o.receiver_user_id, o.resolved_at,
+                               GROUP_CONCAT(DISTINCT oc.item_code) AS offer_codes,
+                               GROUP_CONCAT(DISTINCT rc.item_code) AS requested_codes
+                        FROM trade_offers o
+                        LEFT JOIN trade_offer_cards oc ON oc.offer_id = o.offer_id
+                        LEFT JOIN trade_offer_requested_cards rc ON rc.offer_id = o.offer_id
+                        WHERE o.status = 'accepted'
+                        GROUP BY o.offer_id
+                        ORDER BY o.resolved_at ASC
+                    """).fetchall()
+
+                guild = client.get_guild(GUILD_ID)
+                if not rows:
+                    await thread.send("📊 **Show ended — no trades were completed this show.**")
+                else:
+                    # Build auction number lookup
+                    from Core.db import db_session as _dbs2
+                    with _dbs2(active.db_path) as conn2:
+                        auction_map = {}
+                        for ar in conn2.execute("SELECT item_code, auction_number FROM claims WHERE removed_at IS NULL").fetchall():
+                            if ar["auction_number"]:
+                                auction_map[ar["item_code"]] = ar["auction_number"]
+
+                    def _card_str(code):
+                        num = auction_map.get(code)
+                        return f"{code} #{num}" if num else code
+
+                    lines = [f"📊 **Trade Summary — {len(rows)} trade{'s' if len(rows) != 1 else ''}**"]
+                    for row in rows:
+                        s_m = guild.get_member(int(row["sender_user_id"]))   if guild else None
+                        r_m = guild.get_member(int(row["receiver_user_id"])) if guild else None
+                        s_name = s_m.display_name if s_m else f"<@{row['sender_user_id']}>"
+                        r_name = r_m.display_name if r_m else f"<@{row['receiver_user_id']}>"
+                        offer_codes = row["offer_codes"].split(",")     if row["offer_codes"]     else []
+                        req_codes   = row["requested_codes"].split(",") if row["requested_codes"] else []
+                        s_cards = ", ".join(_card_str(c) for c in offer_codes)
+                        r_cards = ", ".join(_card_str(c) for c in req_codes)
+                        lines.append(f"{s_name} {s_cards}  <->  {r_name} {r_cards}")
+                    await thread.send("\n".join(lines))
+
+                # Archive the thread
+                await thread.edit(archived=True)
+                print(f"[TRADE LOG] Summary posted and thread archived")
+            except Exception as e:
+                print(f"[TRADE LOG] Summary error: {e}")
+
+        asyncio.run_coroutine_threadsafe(_post_trade_summary(), _discord_loop)
+
     return {"ok": True, "posted": posted, "rating": rating}
+
+
+
+@app.post("/bin/sale")
+def api_bin_sale(payload: dict):
+    """
+    Called by the Whatnot screen watcher when a sale is detected.
+    Pushes auction_number + username into the bin queue so the bot's
+    on_message handler can match it when the host types a bin number.
+    """
+    auction_number = payload.get("auction_number")
+    username       = payload.get("username", "").strip()
+    if not auction_number or not username:
+        return {"ok": False, "error": "auction_number and username required"}
+    try:
+        from Core.bin_queue import push_sale
+        row_id = push_sale(int(auction_number), username)
+        print(f"[BIN] Queued sale: auction #{auction_number} @{username} (id={row_id})")
+        return {"ok": True, "id": row_id}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/bin/peek")
+def api_bin_peek():
+    """Returns the latest pending sale without consuming it."""
+    from Core.bin_queue import peek_latest_sale
+    sale = peek_latest_sale()
+    return {"ok": True, "sale": sale}
+
+
+@app.post("/bin/clear")
+def api_bin_clear():
+    """Clear all pending unmatched sales from the queue."""
+    from Core.bin_queue import clear_queue
+    n = clear_queue()
+    return {"ok": True, "cleared": n}
 
 
 @client.event
@@ -635,6 +798,40 @@ async def on_ready():
     global _discord_loop
     _discord_loop = asyncio.get_running_loop()
 
+    # Register bin show listener
+    from Discord.bin_listener import register_bin_listener
+    register_bin_listener(client, core, bot_api_url="http://127.0.0.1:8001")
+    print("✅ Bin listener registered")
+
+    # Init trade system
+    if TRADE_CATEGORY_ID:
+        try:
+            from Trade.trade_hook import register_trade_commands, init_trade_tables
+            from Core.show_service import require_active_show
+            try:
+                active = require_active_show()
+                init_trade_tables(active.db_path)
+                register_trade_commands(
+                    tree,
+                    db_path=active.db_path,
+                    trade_category_id=TRADE_CATEGORY_ID,
+                    announce_channel_id=TRADE_ANNOUNCE_CHANNEL_ID or None,
+                )
+                print("✅ Trade system registered")
+                
+            except Exception:
+                print("⚠️  Trade: no active show at startup — trade commands registered without DB (will init on first use)")
+                register_trade_commands(
+                    tree,
+                    db_path=None,
+                    trade_category_id=TRADE_CATEGORY_ID,
+                    announce_channel_id=TRADE_ANNOUNCE_CHANNEL_ID or None,
+                )
+        except Exception as e:
+            print(f"❌ Trade system failed to load: {e}")
+    else:
+        print("ℹ️  TRADE_CATEGORY_ID not set — trade system disabled")
+
     def run_api():
         uvicorn.run(app, host="127.0.0.1", port=8001, log_level="warning")
 
@@ -643,6 +840,138 @@ async def on_ready():
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
+
+
+
+@app.post("/trade/lock")
+def api_trade_lock():
+    """Lock trades for the active show (called on show end or manually)."""
+    try:
+        from Core.show_service import require_active_show
+        from Core.show_settings_service import set_setting
+        active = require_active_show()
+        set_setting(active.db_path, "trade_locked", "1")
+        return {"ok": True, "message": "Trades locked"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/trade/unlock")
+def api_trade_unlock():
+    """Unlock trades for the active show."""
+    try:
+        from Core.show_service import require_active_show
+        from Core.show_settings_service import set_setting
+        active = require_active_show()
+        set_setting(active.db_path, "trade_locked", "0")
+        return {"ok": True, "message": "Trades unlocked"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/trade/close_channels")
+def api_trade_close_channels():
+    """
+    Delete all private trade channels for the active show.
+    Runs async channel deletion via the Discord event loop.
+    """
+    import asyncio
+
+    async def _close_all():
+        try:
+            from Core.show_service import require_active_show
+            from Core.db import db_session
+            active = require_active_show()
+
+            if not TRADE_CATEGORY_ID:
+                return {"ok": False, "error": "TRADE_CATEGORY_ID not set"}
+
+            guild = client.guilds[0] if client.guilds else None
+            if not guild:
+                return {"ok": False, "error": "Bot not in any guild"}
+
+            with db_session(active.db_path) as conn:
+                rows = conn.execute(
+                    "SELECT channel_id FROM trade_user_channels WHERE guild_id = ?",
+                    (str(guild.id),),
+                ).fetchall()
+
+            closed = 0
+            failed = 0
+            for row in rows:
+                ch_id = int(row["channel_id"])
+                try:
+                    ch = guild.get_channel(ch_id) or await guild.fetch_channel(ch_id)
+                    if ch:
+                        await ch.delete(reason="Show ended — trade channels closed")
+                        closed += 1
+                except Exception:
+                    failed += 1
+
+            # Clear channel records so new show starts fresh
+            with db_session(active.db_path) as conn:
+                conn.execute(
+                    "DELETE FROM trade_user_channels WHERE guild_id = ?",
+                    (str(guild.id),),
+                )
+                conn.execute(
+                    "DELETE FROM trade_ui_messages WHERE guild_id = ?",
+                    (str(guild.id),),
+                )
+
+            return {"ok": True, "closed": closed, "failed": failed}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    future = asyncio.run_coroutine_threadsafe(_close_all(), _discord_loop)
+    return future.result(timeout=60)
+
+@app.post("/trade/refresh_all")
+def api_trade_refresh_all():
+    """Kick off a background refresh of all trade channels. Returns immediately."""
+    import asyncio
+
+    async def _refresh_all():
+        try:
+            from Core.show_service import require_active_show
+            from Core.db import db_session
+            from Trade.services.trade_service import reset_trade_messages
+            from Trade.db.trade_db import ensure_trade_tables
+
+            active = require_active_show()
+            guild  = client.guilds[0] if client.guilds else None
+            if not guild:
+                print("[REFRESH_ALL] No guild found")
+                return
+
+            with db_session(active.db_path) as conn:
+                ensure_trade_tables(conn)
+                rows = conn.execute(
+                    "SELECT user_id, channel_id FROM trade_user_channels WHERE guild_id = ?",
+                    (str(guild.id),),
+                ).fetchall()
+
+            print(f"[REFRESH_ALL] Refreshing {len(rows)} trade channel(s)...")
+            refreshed = 0
+            failed    = 0
+            for row in rows:
+                user_id    = int(row["user_id"])
+                channel_id = int(row["channel_id"])
+                try:
+                    ch = guild.get_channel(channel_id) or await guild.fetch_channel(channel_id)
+                    await reset_trade_messages(active.db_path, ch, user_id, TRADE_ANNOUNCE_CHANNEL_ID or None)
+                    refreshed += 1
+                except Exception as e:
+                    failed += 1
+                    print(f"[REFRESH_ALL] Failed user {user_id}: {e}")
+
+            print(f"[REFRESH_ALL] Done — {refreshed} refreshed, {failed} failed")
+        except Exception as e:
+            print(f"[REFRESH_ALL] Error: {e}")
+
+    asyncio.run_coroutine_threadsafe(_refresh_all(), _discord_loop)
+    return {"ok": True, "message": "Refresh started in background — check bot terminal for progress"}
+
 
 if __name__ == "__main__":
     if not TOKEN:

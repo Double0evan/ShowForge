@@ -371,6 +371,26 @@ async def ui_claims_summary(rating: str = Form(...)):
         return {"ok": False, "error": str(e)}
 
 
+@router.post("/ui/claims/set_auction")
+def ui_claims_set_auction(item_code: str = Form(...), auction_number: str = Form(...)):
+    """Update the auction_number on a claim — for correcting OCR misreads."""
+    active = require_active_show()
+    item_code = item_code.strip().upper()
+    num = auction_number.strip() or None
+    try:
+        from Core.db import db_session
+        with db_session(active.db_path) as conn:
+            cur = conn.execute(
+                "UPDATE claims SET auction_number = ? WHERE item_code = ? AND removed_at IS NULL",
+                (num, item_code),
+            )
+            if cur.rowcount == 0:
+                return {"ok": False, "error": f"No active claim found for {item_code}"}
+        return {"ok": True, "item_code": item_code, "auction_number": num}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 @router.post("/ui/claims/remove")
 async def ui_remove_claim(item_code: str = Form(...), refund: str = Form("true")):
     active    = require_active_show()

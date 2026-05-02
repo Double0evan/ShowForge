@@ -323,7 +323,17 @@ class WatcherClient(discord.Client):
                 show_root = self.cfg.parent_dir / show_folder_name(now)
                 ensure_show_dirs(show_root)
 
-                item_code = self.state.allocate_code(rating)
+                # Derive item code from filename number if possible (e.g. 001.jpg -> N001)
+                # Fall back to sequential counter only if filename has no leading number.
+                import re as _re
+                _stem = src_path.stem  # filename without extension
+                _m    = _re.match(r"^(\d+)", _stem)
+                if _m:
+                    _n    = int(_m.group(1))
+                    prefix = "S" if rating == "sfw" else "N"
+                    item_code = f"{prefix}{_n:03d}"
+                else:
+                    item_code = self.state.allocate_code(rating)
                 ext       = src_path.suffix.lower() or ".jpg"
                 subdir    = "SFW" if rating == "sfw" else "NSFW"
                 raw_dst   = show_root / subdir / "RAW" / f"{item_code}{ext}"

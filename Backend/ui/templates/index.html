@@ -279,6 +279,16 @@ input[type=checkbox]{accent-color:var(--blue);width:14px;height:14px;cursor:poin
         <button class="btn btn-green btn-sm" style="flex:1" onclick="openModal('modal-show')">+ New Show</button>
       {% endif %}
     </div>
+    {% if active_show %}
+    <div style="margin-top:8px;display:flex;flex-direction:column;gap:5px">
+      <button class="btn btn-ghost btn-xs" style="width:100%;justify-content:center"
+        id="btn-trade-lock" onclick="tradeLock()">🔒 Lock Trades</button>
+      <button class="btn btn-ghost btn-xs" style="width:100%;justify-content:center;color:var(--blue)"
+        id="btn-refresh-all" onclick="refreshAllTrade()">↺ Refresh All Trade</button>
+      <button class="btn btn-ghost btn-xs" style="width:100%;justify-content:center;color:var(--red)"
+        id="btn-close-channels" onclick="closeTradeChannels()">🗑 Close Trade Channels</button>
+    </div>
+    {% endif %}
   </div>
 </aside>
 
@@ -291,6 +301,18 @@ input[type=checkbox]{accent-color:var(--blue);width:14px;height:14px;cursor:poin
   <h1 class="page-title">Inventory</h1>
   <div class="topbar-right">
     <span id="refresh-indicator" style="font-size:11px;color:var(--dim);font-family:var(--mono)"></span>
+
+    <!-- Show Mode Toggle -->
+    <div style="display:flex;align-items:center;gap:4px;background:var(--s2);border:1px solid var(--border);border-radius:8px;padding:3px">
+      <button id="btn-mode-standard" class="btn btn-sm" onclick="setMode('standard')"
+        style="background:transparent;color:var(--dim);transition:all .15s">Standard</button>
+      <button id="btn-mode-bin" class="btn btn-sm" onclick="setMode('bin')"
+        style="background:transparent;color:var(--dim);transition:all .15s">🎯 Bin Show</button>
+    </div>
+
+    <!-- Screen Watcher -->
+    <button id="btn-watcher" class="btn btn-purple btn-sm" onclick="startWatcher()">📺 Screen Watcher</button>
+
     <button class="btn btn-ghost btn-sm" onclick="publishAll()">↑ Publish All to Catalog</button>
   </div>
 </div>
@@ -405,7 +427,7 @@ input[type=checkbox]{accent-color:var(--blue);width:14px;height:14px;cursor:poin
         <th class="sortable" onclick="claimsSort('item')" style="cursor:pointer;user-select:none">Item <span id="sort-item"></span></th>
         <th class="sortable" onclick="claimsSort('user')" style="cursor:pointer;user-select:none">User <span id="sort-user"></span></th>
         <th>Source</th>
-        <th class="sortable" onclick="claimsSort('note')" style="cursor:pointer;user-select:none">Note <span id="sort-note"></span></th>
+        <th class="sortable" onclick="claimsSort('note')" style="cursor:pointer;user-select:none">Auction # <span id="sort-note"></span></th>
         <th class="sortable" onclick="claimsSort('date')" style="cursor:pointer;user-select:none">Claimed At <span id="sort-date">↓</span></th>
         <th style="text-align:right">Actions</th>
       </tr></thead>
@@ -428,7 +450,14 @@ input[type=checkbox]{accent-color:var(--blue);width:14px;height:14px;cursor:poin
         <td><span style="font-weight:500">{{ c.user_display_name }}</span><span style="color:var(--dim);font-size:11px;margin-left:5px">#{{ c.user_id }}</span></td>
         <td><span style="color:var(--dim);font-size:12px">{{ c.source }}</span></td>
         <td style="font-size:12px">
-          {% if c.voucher_note %}<span style="color:var(--text)">{{ c.voucher_note }}</span>{% else %}<span style="color:var(--dim)">—</span>{% endif %}
+          <div style="display:flex;align-items:center;gap:6px">
+            <span id="auc-{{ c.item_code }}" style="font-family:var(--mono)">
+              {% if c.auction_number %}#{{ c.auction_number }}{% else %}<span style="color:var(--dim)">—</span>{% endif %}
+            </span>
+            <button onclick="editAuction('{{ c.item_code }}','{{ c.auction_number or '' }}')"
+              style="background:none;border:none;color:var(--dim);cursor:pointer;font-size:12px;padding:2px 4px;border-radius:4px"
+              title="Edit auction number">✎</button>
+          </div>
         </td>
         <td style="color:var(--dim);font-family:var(--mono);font-size:11px">{{ c.created_at[:16].replace('T',' ') if c.created_at else '—' }}</td>
         <td style="text-align:right">
@@ -585,6 +614,84 @@ input[type=checkbox]{accent-color:var(--blue);width:14px;height:14px;cursor:poin
             <tr><td style="padding:6px 16px 6px 0"><span class="badge badge-claimed">NSFW</span></td><td style="color:var(--muted)">{% if env %}{{ env.get('WATCHER_PARENT_DIR','—') }}\INBOX\NSFW{% else %}—{% endif %}</td></tr>
           </tbody>
         </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+  <!-- ── Bin Queue Panel ─────────────────────────────────────────────────── -->
+  <div style="margin-top:18px" id="bin-queue-section">
+    <div class="settings-block">
+      <div class="settings-block-header" style="display:flex;align-items:center;justify-content:space-between">
+        <span>🎯 Bin Queue</span>
+        <div style="display:flex;gap:8px;align-items:center">
+          <span id="bin-queue-badge" style="font-family:var(--mono);font-size:11px;color:var(--dim)">— pending</span>
+          <button class="btn btn-ghost btn-xs" onclick="loadBinQueue()">↺ Refresh</button>
+          <button class="btn btn-red btn-xs" onclick="clearBinQueue()">Clear Queue</button>
+        </div>
+      </div>
+      <div id="bin-queue-body" style="padding:12px 0">
+        <div style="padding:20px 16px;text-align:center;color:var(--dim);font-style:italic;font-size:12px">Loading…</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Reassign Claim Panel ─────────────────────────────────────────── -->
+  <div style="margin-top:18px" id="bin-reassign-section">
+    <div class="settings-block">
+      <div class="settings-block-header">🔄 Reassign Claim</div>
+      <div style="padding:16px;display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap">
+        <div style="display:flex;flex-direction:column;gap:5px">
+          <label style="font-size:10px;color:var(--dim);font-family:var(--mono);text-transform:uppercase;letter-spacing:.1em">Item Code</label>
+          <input id="reassign-item" type="text" placeholder="e.g. N001"
+            style="background:var(--s3);border:1px solid var(--border2);border-radius:7px;padding:7px 12px;color:var(--text);font-family:var(--mono);font-size:13px;width:120px"
+            onkeydown="if(event.key==='Enter')reassignClaim()">
+        </div>
+        <div style="display:flex;flex-direction:column;gap:5px">
+          <label style="font-size:10px;color:var(--dim);font-family:var(--mono);text-transform:uppercase;letter-spacing:.1em">Correct Discord Name</label>
+          <input id="reassign-user" type="text" placeholder="exact display name"
+            style="background:var(--s3);border:1px solid var(--border2);border-radius:7px;padding:7px 12px;color:var(--text);font-family:var(--mono);font-size:13px;width:220px"
+            onkeydown="if(event.key==='Enter')reassignClaim()">
+        </div>
+        <button class="btn btn-orange btn-sm" onclick="reassignClaim()" style="background:var(--orange)">🔄 Reassign</button>
+        <span id="reassign-result" style="font-family:var(--mono);font-size:12px;color:var(--dim)"></span>
+      </div>
+      <div style="padding:0 16px 12px;font-size:11px;color:var(--dim)">Removes old claim (with refund) and reassigns to the correct user. User must have joined the server and been seen by the bot.</div>
+    </div>
+  </div>
+
+  <!-- ── Test Inject Panel ─────────────────────────────────────────────── -->
+  <div style="margin-top:18px" id="bin-inject-section">
+    <div class="settings-block">
+      <div class="settings-block-header">🧪 Inject Test Sale</div>
+      <div style="padding:16px;display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap">
+        <div style="display:flex;flex-direction:column;gap:5px">
+          <label style="font-size:10px;color:var(--dim);font-family:var(--mono);text-transform:uppercase;letter-spacing:.1em">Whatnot Username</label>
+          <input id="inject-username" type="text" placeholder="e.g. bawnzy"
+            style="background:var(--s3);border:1px solid var(--border2);border-radius:7px;padding:7px 12px;color:var(--text);font-family:var(--mono);font-size:13px;width:200px"
+            onkeydown="if(event.key==='Enter')injectSale()">
+        </div>
+        <div style="display:flex;flex-direction:column;gap:5px">
+          <label style="font-size:10px;color:var(--dim);font-family:var(--mono);text-transform:uppercase;letter-spacing:.1em">Auction # (optional)</label>
+          <input id="inject-auction" type="number" placeholder="auto"
+            style="background:var(--s3);border:1px solid var(--border2);border-radius:7px;padding:7px 12px;color:var(--text);font-family:var(--mono);font-size:13px;width:120px"
+            onkeydown="if(event.key==='Enter')injectSale()">
+        </div>
+        <button class="btn btn-purple btn-sm" onclick="injectSale()">💉 Inject Sale</button>
+        <span id="inject-result" style="font-family:var(--mono);font-size:12px;color:var(--dim)"></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Pending Reviews Panel ───────────────────────────────────────────── -->
+  <div style="margin-top:18px" id="reviews-section">
+    <div class="settings-block">
+      <div class="settings-block-header" style="display:flex;align-items:center;justify-content:space-between">
+        <span>⚠️ Low-Confidence Match Reviews</span>
+        <span id="review-count-badge" style="font-family:var(--mono);font-size:11px;color:var(--dim)">— pending</span>
+      </div>
+      <div id="reviews-body" style="padding:12px 0">
+        <div style="padding:20px 16px;text-align:center;color:var(--dim);font-style:italic;font-size:12px">No reviews pending.</div>
       </div>
     </div>
   </div>
@@ -856,6 +963,7 @@ input[type=checkbox]{accent-color:var(--blue);width:14px;height:14px;cursor:poin
 
 <!-- ════ SCRIPTS ════ -->
 <script>
+function escHtml(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
 // ── Helpers ───────────────────────────────────────────────────────────────────
 let _toastTimer;
 function toast(msg,type='ok'){const el=document.getElementById('toast');el.textContent=msg;el.className=`show ${type}`;clearTimeout(_toastTimer);_toastTimer=setTimeout(()=>el.className='',3200)}
@@ -1097,6 +1205,25 @@ function claimsSort(col) {
     return _claimSortAsc ? cmp : -cmp;
   });
   rows.forEach(r => tbody.appendChild(r));
+}
+
+async function editAuction(itemCode, current) {
+  const val = prompt('Edit auction number for ' + itemCode + ':', current || '');
+  if (val === null) return;
+  const num = val.trim();
+  try {
+    const fd = new FormData();
+    fd.append('item_code', itemCode);
+    fd.append('auction_number', num);
+    const d = await fetch('/ui/claims/set_auction', { method: 'POST', body: fd }).then(r => r.json());
+    if (d.ok) {
+      const el = document.getElementById('auc-' + itemCode);
+      if (el) el.innerHTML = num ? '#' + num : '<span style="color:var(--dim)">—</span>';
+      toast('Auction # updated');
+    } else {
+      toast(d.error || 'Update failed', 'err');
+    }
+  } catch(e) { toast('Network error', 'err'); }
 }
 
 async function removeClaim(code,refund){
@@ -1394,7 +1521,7 @@ function acKeyDown(e) {
   }
 }
 
-function escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+// escHtml defined globally above
 function escAttr(s) { return String(s).replace(/"/g,'&quot;'); }
 
 async function runConsole() {
@@ -1538,6 +1665,212 @@ function switchHTab(btn,targetId){
   btn.classList.add('active');document.getElementById(targetId)?.classList.add('active');
 }
 {% endif %}
+
+// ── Show Mode ────────────────────────────────────────────────────────────────
+async function loadMode() {
+  try {
+    const d = await fetch('/shows/mode').then(r => r.json());
+    _applyMode(d.show_mode || 'standard');
+  } catch(e) {}
+}
+
+function _applyMode(mode) {
+  const std = document.getElementById('btn-mode-standard');
+  const bin = document.getElementById('btn-mode-bin');
+  if (!std || !bin) return;
+  if (mode === 'bin') {
+    bin.style.background  = 'var(--purple-g)';  bin.style.color  = '#fff';
+    std.style.background  = 'transparent';       std.style.color  = 'var(--dim)';
+  } else {
+    std.style.background  = 'var(--blue-g)';     std.style.color  = '#fff';
+    bin.style.background  = 'transparent';        bin.style.color  = 'var(--dim)';
+  }
+}
+
+async function setMode(mode) {
+  await fetch('/shows/mode?mode=' + mode, { method: 'POST' });
+  _applyMode(mode);
+  toast(mode === 'bin' ? '🎯 Bin show mode active' : 'Standard mode active');
+}
+
+// ── Screen Watcher ───────────────────────────────────────────────────────────
+async function startWatcher() {
+  const btn = document.getElementById('btn-watcher');
+  const orig = btn.innerText;
+  btn.innerText = 'Launching...';
+  btn.disabled  = true;
+  try {
+    const d = await fetch('/watcher/start', { method: 'POST' }).then(r => r.json());
+    if (d.ok) {
+      btn.innerText = '✅ Launched';
+      toast('Screen watcher launched — select your region');
+    } else {
+      btn.innerText = '❌ Failed';
+      toast(d.detail || 'Launch failed', 'err');
+    }
+  } catch(e) {
+    btn.innerText = '❌ Error';
+    toast('Network error', 'err');
+  }
+  setTimeout(() => { btn.innerText = orig; btn.disabled = false; }, 4000);
+}
+
+window.addEventListener('DOMContentLoaded', () => { loadMode(); loadBinQueue(); });
+
+// ── Bin Queue ─────────────────────────────────────────────────────────────────
+async function loadBinQueue() {
+  const body  = document.getElementById('bin-queue-body');
+  const badge = document.getElementById('bin-queue-badge');
+  if (!body) return;
+  try {
+    const d = await fetch('/bin/queue').then(r => r.json());
+    if (!d.ok && d.error) { body.innerHTML = '<div style="padding:16px;color:var(--red);font-size:12px">Error: ' + escHtml(d.error) + '</div>'; return; }
+    const rows = d.pending || [];
+    badge.textContent = rows.length + ' pending';
+    if (!rows.length) {
+      body.innerHTML = '<div style="padding:20px 16px;text-align:center;color:var(--dim);font-style:italic;font-size:12px">Queue is empty.</div>';
+      return;
+    }
+    body.innerHTML = '<table style="width:100%"><thead><tr>' +
+      '<th>Auction #</th><th>Username</th><th>Detected</th><th>Age</th><th></th>' +
+      '</tr></thead><tbody>' +
+      rows.map(r => {
+        const det  = new Date(r.detected_at);
+        const age  = Math.round((Date.now() - det.getTime()) / 1000);
+        const ageStr = age < 60 ? age + 's' : Math.round(age/60) + 'm';
+        const stale  = age > 3600;
+        return '<tr id="bqrow-' + r.id + '">' +
+          '<td><span class="code">#' + (r.auction_number||'?') + '</span></td>' +
+          '<td style="font-family:var(--mono);font-size:12px">@' + escHtml(r.username||'') + '</td>' +
+          '<td style="color:var(--dim);font-size:12px">' + det.toLocaleTimeString() + '</td>' +
+          '<td style="font-family:var(--mono);font-size:12px;color:' + (stale?'var(--red)':'var(--green)') + '">' + ageStr + '</td>' +
+          '<td><button onclick="deleteBinRow(' + r.id + ')" style="background:none;border:none;color:var(--red);cursor:pointer;font-size:15px;padding:2px 6px;border-radius:4px" title="Remove">✕</button></td>' +
+          '</tr>';
+      }).join('') + '</tbody></table>';
+  } catch(e) {
+    body.innerHTML = '<div style="padding:16px;color:var(--red);font-size:12px">Failed to load queue: ' + e + '</div>';
+  }
+}
+
+async function reassignClaim() {
+  const item  = document.getElementById('reassign-item')?.value.trim().toUpperCase();
+  const user  = document.getElementById('reassign-user')?.value.trim();
+  const res   = document.getElementById('reassign-result');
+  if (!item || !user) { toast('Enter item code and username', 'err'); return; }
+  try {
+    const d = await fetch('/bin/reassign?item_code=' + encodeURIComponent(item) + '&new_discord_display_name=' + encodeURIComponent(user) + '&refund_old=true', {method:'POST'}).then(r=>r.json());
+    if (d.ok) {
+      if (res) res.textContent = '✓ ' + item + ' reassigned to ' + user;
+      toast('Reassigned ' + item + ' → ' + user);
+      document.getElementById('reassign-item').value = '';
+      document.getElementById('reassign-user').value = '';
+    } else {
+      toast((d.detail?.message || d.detail || 'Reassign failed'), 'err');
+    }
+  } catch(e) { toast('Network error', 'err'); }
+}
+
+async function deleteBinRow(id) {
+  try {
+    const d = await fetch('/bin/queue/' + id, {method:'DELETE'}).then(r=>r.json());
+    if (d.ok) {
+      const row = document.getElementById('bqrow-' + id);
+      if (row) row.remove();
+      const badge = document.getElementById('bin-queue-badge');
+      if (badge) {
+        const remaining = document.querySelectorAll('[id^="bqrow-"]').length;
+        badge.textContent = remaining + ' pending';
+      }
+    } else { toast('Delete failed', 'err'); }
+  } catch(e) { toast('Network error', 'err'); }
+}
+
+async function clearBinQueue() {
+  if (!confirm('Clear the entire bin queue?')) return;
+  await fetch('/bin/clear', {method:'POST'});
+  toast('Queue cleared');
+  loadBinQueue();
+}
+
+async function injectSale() {
+  const username = document.getElementById('inject-username')?.value.trim();
+  const auctionRaw = document.getElementById('inject-auction')?.value.trim();
+  const result  = document.getElementById('inject-result');
+  if (!username) { toast('Enter a username', 'err'); return; }
+  const params = new URLSearchParams({username});
+  if (auctionRaw) params.set('auction_number', auctionRaw);
+  try {
+    const d = await fetch('/bin/inject?' + params.toString(), {method:'POST'}).then(r=>r.json());
+    if (d.ok) {
+      if (result) result.textContent = '✓ Injected auction #' + d.auction_number + ' for @' + d.username;
+      toast('Sale injected — now type the item number in #claim-bot-commands');
+      document.getElementById('inject-username').value = '';
+      document.getElementById('inject-auction').value = '';
+      loadBinQueue();
+    } else {
+      toast(d.error || 'Inject failed', 'err');
+    }
+  } catch(e) { toast('Network error', 'err'); }
+}
+
+
+// ── Trade Admin ──────────────────────────────────────────────────────────────
+async function tradeLock() {
+  const btn = document.getElementById('btn-trade-lock');
+  if (!btn) return;
+  const isLocked = btn.textContent.includes('Unlock');
+  const url = isLocked ? '/trade/unlock' : '/trade/lock';
+  btn.disabled = true;
+  try {
+    const d = await fetch(url, { method: 'POST' }).then(r => r.json());
+    if (d.ok) {
+      btn.textContent = isLocked ? '🔒 Lock Trades' : '🔓 Unlock Trades';
+      toast(d.message || (isLocked ? 'Trades unlocked' : 'Trades locked'));
+    } else {
+      toast(d.error || 'Failed', 'err');
+    }
+  } catch(e) { toast('Network error', 'err'); }
+  btn.disabled = false;
+}
+
+async function refreshAllTrade() {
+  const btn = document.getElementById('btn-refresh-all');
+  if (btn) { btn.textContent = 'Refreshing...'; btn.disabled = true; }
+  try {
+    const d = await fetch('/trade/refresh_all', { method: 'POST' }).then(r => r.json());
+    if (d.ok) {
+      toast(d.message || 'Refresh started — check bot terminal for progress');
+    } else {
+      toast(d.error || 'Refresh failed', 'err');
+    }
+  } catch(e) { toast('Network error', 'err'); }
+  if (btn) { btn.textContent = '↺ Refresh All Trade'; btn.disabled = false; }
+}
+
+async function closeTradeChannels() {
+  if (!confirm('Delete ALL private trade channels for this show?\nThis cannot be undone.')) return;
+  const btn = document.getElementById('btn-close-channels');
+  if (btn) { btn.textContent = 'Closing...'; btn.disabled = true; }
+  try {
+    const d = await fetch('/trade/close_channels', { method: 'POST' }).then(r => r.json());
+    if (d.ok) {
+      toast(`Closed ${d.closed} channel(s)${d.failed ? ', ' + d.failed + ' failed' : ''}`);
+    } else {
+      toast(d.error || 'Failed', 'err');
+    }
+  } catch(e) { toast('Network error', 'err'); }
+  if (btn) { btn.textContent = '🗑 Close Trade Channels'; btn.disabled = false; }
+}
+
+// Check trade lock state on load and update button label
+(async function() {
+  try {
+    const d = await fetch('/shows/settings/get?key=trade_locked').then(r => r.json());
+    const btn = document.getElementById('btn-trade-lock');
+    if (btn && d.value === '1') btn.textContent = '🔓 Unlock Trades';
+  } catch(e) {}
+})();
+
 </script>
 </body>
 </html>

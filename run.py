@@ -7,9 +7,12 @@ Run from the repo root:
 Opens 3 terminal windows:
     [V3 Backend]  — FastAPI on port 8000
     [V3 Bot]      — Discord bot + internal API on port 8001
-    [V3 Watcher]  — File watcher
+    [V3 Watcher]  — File upload watcher
 
 Then opens http://127.0.0.1:8000/ui in your browser.
+
+The Whatnot screen watcher is NOT started automatically.
+Use /start_watcher in Discord to launch it when running a bin show.
 """
 
 import subprocess
@@ -75,6 +78,7 @@ def main():
 
     print("\n✅ All processes launched.")
     print("   Close the terminal windows to stop each service.")
+    print("   Use /start_watcher in Discord to launch the Whatnot screen watcher.")
     print("   Press Ctrl+C here to exit the launcher.\n")
 
     try:

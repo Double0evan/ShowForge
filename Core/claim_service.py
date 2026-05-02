@@ -58,6 +58,7 @@ def create_claim(
     source: str = "staff",
     reaction_message_id: Optional[str] = None,
     reaction_emoji: Optional[str] = None,
+    auction_number: Optional[str] = None,
 ) -> dict:
     item_code = item_code.strip().upper()
 
@@ -117,11 +118,13 @@ def create_claim(
                 INSERT INTO claims
                   (item_code, user_id, voucher_spend_id, source,
                    reaction_message_id, reaction_emoji,
+                   auction_number,
                    created_at, removed_at, removed_reason)
-                VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
                 """,
                 (item_code, user_id, spend_id, source,
-                 reaction_message_id, reaction_emoji, _now_iso()),
+                 reaction_message_id, reaction_emoji,
+                 auction_number, _now_iso()),
             )
         except sqlite3.IntegrityError:
             # Race condition — another request claimed it first.
