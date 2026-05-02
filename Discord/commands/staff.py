@@ -30,7 +30,7 @@ def register(
         await interaction.response.defer(ephemeral=True)
 
         try:
-            internal_user_id = core.upsert_discord_user(user.id, user.display_name)
+            internal_user_id, _ = core.upsert_discord_user(user.id, user.display_name)
             for _ in range(amount):
                 core.award_voucher(internal_user_id, "STAFF_ADJUST", "Discord /award")
         except Exception as e:

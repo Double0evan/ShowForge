@@ -260,6 +260,7 @@ input[type=checkbox]{accent-color:var(--blue);width:14px;height:14px;cursor:poin
     <a href="/ui/users"    class="{% if page=='users'     %}active{% endif %}"><span class="nav-icon">👤</span> Users</a>
     <a href="/ui/members"  class="{% if page=='members'   %}active{% endif %}"><span class="nav-icon">🌐</span> Members</a>
     <div class="nav-section">Tools</div>
+    <a href="/ui/binshow" class="{% if page=='binshow'   %}active{% endif %}"><span class="nav-icon">🎯</span> Bin Manager</a>
     <a href="/ui/watcher"  class="{% if page=='watcher'   %}active{% endif %}"><span class="nav-icon">👁</span> Watcher</a>
     <a href="/ui/console"  class="{% if page=='console'   %}active{% endif %}"><span class="nav-icon">💻</span> Console</a>
     <a href="/ui/history"  class="{% if page=='history'   %}active{% endif %}"><span class="nav-icon">🗂</span> History</a>
@@ -387,6 +388,14 @@ input[type=checkbox]{accent-color:var(--blue);width:14px;height:14px;cursor:poin
               {% endif %}
             {% endif %}
             <button class="btn btn-red btn-xs" {% if item.status in ['removed','claimed_removed'] %}disabled{% endif %} onclick="removeItem('{{ item.item_code }}')">✕</button>
+            <button class="btn btn-ghost btn-xs" title="Direct assign" onclick="toggleAssign('{{ item.item_code }}')">👤 Assign</button>
+          </div>
+          <div id="assign-{{ item.item_code }}" style="display:none;margin-top:6px;display:none">
+            <input id="assign-input-{{ item.item_code }}" type="text" placeholder="Discord display name"
+              style="background:var(--s3);border:1px solid var(--border2);border-radius:6px;padding:5px 8px;color:var(--text);font-size:12px;width:160px;font-family:var(--mono)"
+              onkeydown="if(event.key==='Enter')directAssign('{{ item.item_code }}')">
+            <button class="btn btn-green btn-xs" onclick="directAssign('{{ item.item_code }}')">✓</button>
+            <button class="btn btn-ghost btn-xs" onclick="toggleAssign('{{ item.item_code }}')">✕</button>
           </div>
         </td>
       </tr>
@@ -591,6 +600,38 @@ input[type=checkbox]{accent-color:var(--blue);width:14px;height:14px;cursor:poin
 
 
 <!-- ════ WATCHER ════ -->
+{% if page == 'binshow' %}
+<div class="page-header" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
+  <div>
+    <h1>🎯 Bin Show Manager</h1>
+    <p style="color:var(--dim);font-size:13px;margin:0">Rows auto-populate as host types numbers in Discord. Paste winner name → Enter to assign.</p>
+  </div>
+  <div style="display:flex;gap:8px">
+    <button class="btn btn-ghost btn-sm" onclick="loadBinLog()">↺ Refresh</button>
+    <button class="btn btn-red btn-sm" onclick="clearBinLog()">🗑 Clear Log</button>
+  </div>
+</div>
+
+<div id="binshow-wrap" style="margin-top:12px">
+  <table style="width:100%;border-collapse:collapse">
+    <thead>
+      <tr>
+        <th style="width:50px">Auction</th>
+        <th style="width:70px">Card</th>
+        <th style="width:100px">Preview</th>
+        <th>Whatnot Username</th>
+        <th>Discord Match</th>
+        <th>Status</th>
+        <th style="width:80px">Actions</th>
+      </tr>
+    </thead>
+    <tbody id="binshow-body">
+      <tr><td colspan="7" style="text-align:center;color:var(--dim);padding:40px;font-style:italic">Waiting for host to type numbers in Discord...</td></tr>
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
 {% if page == 'watcher' %}
 <div class="topbar">
   <h1 class="page-title">Watcher</h1>
@@ -688,10 +729,13 @@ input[type=checkbox]{accent-color:var(--blue);width:14px;height:14px;cursor:poin
     <div class="settings-block">
       <div class="settings-block-header" style="display:flex;align-items:center;justify-content:space-between">
         <span>⚠️ Low-Confidence Match Reviews</span>
-        <span id="review-count-badge" style="font-family:var(--mono);font-size:11px;color:var(--dim)">— pending</span>
+        <div style="display:flex;gap:8px;align-items:center">
+          <span id="review-count-badge" style="font-family:var(--mono);font-size:11px;color:var(--dim)">— pending</span>
+          <button class="btn btn-ghost btn-xs" onclick="loadReviews()">↺ Refresh</button>
+        </div>
       </div>
       <div id="reviews-body" style="padding:12px 0">
-        <div style="padding:20px 16px;text-align:center;color:var(--dim);font-style:italic;font-size:12px">No reviews pending.</div>
+        <div style="padding:20px 16px;text-align:center;color:var(--dim);font-style:italic;font-size:12px">Loading...</div>
       </div>
     </div>
   </div>
@@ -1120,6 +1164,37 @@ async function republish(code){
 }
 
 // ── Remove item ───────────────────────────────────────────────────────────────
+function toggleAssign(itemCode) {
+  const div = document.getElementById('assign-' + itemCode);
+  if (!div) return;
+  const showing = div.style.display !== 'none';
+  div.style.display = showing ? 'none' : 'block';
+  if (!showing) setTimeout(() => document.getElementById('assign-input-' + itemCode)?.focus(), 50);
+}
+
+async function directAssign(itemCode) {
+  const input = document.getElementById('assign-input-' + itemCode);
+  const name  = input?.value.trim();
+  if (!name) { toast('Enter a display name', 'err'); return; }
+  try {
+    const fd = new FormData();
+    fd.append('item_code', itemCode);
+    fd.append('display_name', name);
+    const d = await fetch('/ui/inventory/assign', { method: 'POST', body: fd }).then(r => r.json());
+    if (d.ok) {
+      toast(itemCode + ' assigned to ' + name);
+      // Update status badge
+      const badge = document.getElementById('status-' + itemCode);
+      if (badge) { badge.textContent = 'claimed'; badge.className = 'badge badge-claimed'; }
+      // Hide assign form
+      const div = document.getElementById('assign-' + itemCode);
+      if (div) div.style.display = 'none';
+    } else {
+      toast(d.error || 'Assign failed', 'err');
+    }
+  } catch(e) { toast('Network error', 'err'); }
+}
+
 async function removeItem(code){
   if(!confirm(`Remove ${code}?`))return;
   const fd=new FormData();fd.append('item_code',code);
@@ -1715,106 +1790,176 @@ async function startWatcher() {
   setTimeout(() => { btn.innerText = orig; btn.disabled = false; }, 4000);
 }
 
-window.addEventListener('DOMContentLoaded', () => { loadMode(); loadBinQueue(); });
+window.addEventListener('DOMContentLoaded', () => {
+  if (typeof loadMode === 'function') loadMode();
+  if (typeof loadBinQueue === 'function') loadBinQueue();
+  if (typeof loadReviews === 'function') loadReviews();
+  if (document.getElementById('binshow-body')) initBinShow();
+});
 
-// ── Bin Queue ─────────────────────────────────────────────────────────────────
-async function loadBinQueue() {
-  const body  = document.getElementById('bin-queue-body');
-  const badge = document.getElementById('bin-queue-badge');
-  if (!body) return;
+// ── Bin Show Manager ──────────────────────────────────────────────────────────
+let _bsPollTimer = null;
+
+function initBinShow() {
+  loadBinLog();
+  _bsPollTimer = setInterval(loadBinLog, 3000);
+}
+
+async function loadBinLog() {
   try {
-    const d = await fetch('/bin/queue').then(r => r.json());
-    if (!d.ok && d.error) { body.innerHTML = '<div style="padding:16px;color:var(--red);font-size:12px">Error: ' + escHtml(d.error) + '</div>'; return; }
-    const rows = d.pending || [];
-    badge.textContent = rows.length + ' pending';
-    if (!rows.length) {
-      body.innerHTML = '<div style="padding:20px 16px;text-align:center;color:var(--dim);font-style:italic;font-size:12px">Queue is empty.</div>';
-      return;
-    }
-    body.innerHTML = '<table style="width:100%"><thead><tr>' +
-      '<th>Auction #</th><th>Username</th><th>Detected</th><th>Age</th><th></th>' +
-      '</tr></thead><tbody>' +
-      rows.map(r => {
-        const det  = new Date(r.detected_at);
-        const age  = Math.round((Date.now() - det.getTime()) / 1000);
-        const ageStr = age < 60 ? age + 's' : Math.round(age/60) + 'm';
-        const stale  = age > 3600;
-        return '<tr id="bqrow-' + r.id + '">' +
-          '<td><span class="code">#' + (r.auction_number||'?') + '</span></td>' +
-          '<td style="font-family:var(--mono);font-size:12px">@' + escHtml(r.username||'') + '</td>' +
-          '<td style="color:var(--dim);font-size:12px">' + det.toLocaleTimeString() + '</td>' +
-          '<td style="font-family:var(--mono);font-size:12px;color:' + (stale?'var(--red)':'var(--green)') + '">' + ageStr + '</td>' +
-          '<td><button onclick="deleteBinRow(' + r.id + ')" style="background:none;border:none;color:var(--red);cursor:pointer;font-size:15px;padding:2px 6px;border-radius:4px" title="Remove">✕</button></td>' +
-          '</tr>';
-      }).join('') + '</tbody></table>';
-  } catch(e) {
-    body.innerHTML = '<div style="padding:16px;color:var(--red);font-size:12px">Failed to load queue: ' + e + '</div>';
+    const d = await fetch('/ui/binshow/log').then(r => r.json());
+    if (!d.ok) return;
+    renderBinLog(d.rows);
+  } catch(e) {}
+}
+
+function renderBinLog(rows) {
+  const tbody = document.getElementById('binshow-body');
+  if (!tbody) return;
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--dim);padding:40px;font-style:italic">Waiting for host to type numbers in Discord...</td></tr>';
+    return;
   }
-}
-
-async function reassignClaim() {
-  const item  = document.getElementById('reassign-item')?.value.trim().toUpperCase();
-  const user  = document.getElementById('reassign-user')?.value.trim();
-  const res   = document.getElementById('reassign-result');
-  if (!item || !user) { toast('Enter item code and username', 'err'); return; }
-  try {
-    const d = await fetch('/bin/reassign?item_code=' + encodeURIComponent(item) + '&new_discord_display_name=' + encodeURIComponent(user) + '&refund_old=true', {method:'POST'}).then(r=>r.json());
-    if (d.ok) {
-      if (res) res.textContent = '✓ ' + item + ' reassigned to ' + user;
-      toast('Reassigned ' + item + ' → ' + user);
-      document.getElementById('reassign-item').value = '';
-      document.getElementById('reassign-user').value = '';
-    } else {
-      toast((d.detail?.message || d.detail || 'Reassign failed'), 'err');
+  const existing = new Set([...tbody.querySelectorAll('tr[id^="bsr-"]')].map(r => r.id));
+  rows.forEach((row, idx) => {
+    const auctionNum = idx + 1;
+    const rowId = 'bsr-' + row.id;
+    const code  = 'N' + String(row.card_number).padStart(3, '0');
+    if (!existing.has(rowId)) {
+      const tr = document.createElement('tr');
+      tr.id = rowId;
+      tr.innerHTML = `
+        <td style="font-family:var(--mono);font-size:13px;color:var(--dim);text-align:center">#${auctionNum}</td>
+        <td style="font-family:var(--mono);font-size:13px;font-weight:600">${code}</td>
+        <td><div id="bsp-${row.id}" style="width:56px;height:56px;border-radius:6px;background:var(--s3);overflow:hidden;display:flex;align-items:center;justify-content:center;color:var(--dim);font-size:10px">—</div></td>
+        <td><input id="bsi-${row.id}" type="text" placeholder="paste winner name..."
+          style="width:100%;background:var(--s3);border:1px solid var(--border2);border-radius:6px;padding:6px 10px;color:var(--text);font-family:var(--mono);font-size:13px"
+          onkeydown="bsKeydown(event,${row.id})" oninput="bsInput(event,${row.id})"></td>
+        <td id="bsm-${row.id}" style="font-size:12px;color:var(--dim)">—</td>
+        <td id="bss-${row.id}" style="font-size:12px">—</td>
+        <td style="display:flex;gap:4px">
+          <button class="btn btn-red btn-xs" onclick="bsDelete(${row.id})" title="Remove wrong entry">✕</button>
+          <button class="btn btn-ghost btn-xs" onclick="bsOverride(${row.id})" title="Override name">↺</button>
+        </td>`;
+      tbody.appendChild(tr);
+      bsLoadPreview(row.id, code);
     }
-  } catch(e) { toast('Network error', 'err'); }
-}
-
-async function deleteBinRow(id) {
-  try {
-    const d = await fetch('/bin/queue/' + id, {method:'DELETE'}).then(r=>r.json());
-    if (d.ok) {
-      const row = document.getElementById('bqrow-' + id);
-      if (row) row.remove();
-      const badge = document.getElementById('bin-queue-badge');
-      if (badge) {
-        const remaining = document.querySelectorAll('[id^="bqrow-"]').length;
-        badge.textContent = remaining + ' pending';
-      }
-    } else { toast('Delete failed', 'err'); }
-  } catch(e) { toast('Network error', 'err'); }
-}
-
-async function clearBinQueue() {
-  if (!confirm('Clear the entire bin queue?')) return;
-  await fetch('/bin/clear', {method:'POST'});
-  toast('Queue cleared');
-  loadBinQueue();
-}
-
-async function injectSale() {
-  const username = document.getElementById('inject-username')?.value.trim();
-  const auctionRaw = document.getElementById('inject-auction')?.value.trim();
-  const result  = document.getElementById('inject-result');
-  if (!username) { toast('Enter a username', 'err'); return; }
-  const params = new URLSearchParams({username});
-  if (auctionRaw) params.set('auction_number', auctionRaw);
-  try {
-    const d = await fetch('/bin/inject?' + params.toString(), {method:'POST'}).then(r=>r.json());
-    if (d.ok) {
-      if (result) result.textContent = '✓ Injected auction #' + d.auction_number + ' for @' + d.username;
-      toast('Sale injected — now type the item number in #claim-bot-commands');
-      document.getElementById('inject-username').value = '';
-      document.getElementById('inject-auction').value = '';
-      loadBinQueue();
-    } else {
-      toast(d.error || 'Inject failed', 'err');
+    if (row.claimed && row.discord_name) {
+      const input    = document.getElementById('bsi-' + row.id);
+      const statusEl = document.getElementById('bss-' + row.id);
+      const matchEl  = document.getElementById('bsm-' + row.id);
+      if (input && !input.disabled) { input.value = row.winner_name||''; input.disabled=true; input.style.opacity='0.5'; }
+      if (statusEl && !statusEl.dataset.set) { statusEl.innerHTML='<span style="color:var(--green)">✅ Assigned</span>'; statusEl.dataset.set='1'; }
+      if (matchEl && !matchEl.dataset.set) { matchEl.innerHTML=`<span style="color:var(--green);font-family:var(--mono)">${escHtml(row.discord_name)}</span>`; matchEl.dataset.set='1'; }
     }
-  } catch(e) { toast('Network error', 'err'); }
+  });
+  const inputs = tbody.querySelectorAll('input:not([disabled])');
+  if (inputs.length && document.activeElement?.tagName !== 'INPUT') inputs[0].focus();
 }
 
+let _bsFuzzyTimer = {};
+const _bsMatchCache = {};
+function bsInput(e, id) {
+  clearTimeout(_bsFuzzyTimer[id]);
+  const val = e.target.value.trim();
+  const matchEl = document.getElementById('bsm-' + id);
+  if (!val) { if (matchEl) matchEl.innerHTML = '—'; return; }
+  if (matchEl) matchEl.innerHTML = '<span style="color:var(--dim)">matching...</span>';
+  _bsFuzzyTimer[id] = setTimeout(() => bsFuzzy(id, val), 800);
+}
 
-// ── Trade Admin ──────────────────────────────────────────────────────────────
+async function bsFuzzy(id, name) {
+  const matchEl = document.getElementById('bsm-' + id);
+  try {
+    const d = await fetch('/ui/binshow/fuzzy?whatnot_name=' + encodeURIComponent(name)).then(r => r.json());
+    _bsMatchCache[id] = d;
+    if (!matchEl) return;
+    if (d.ok) {
+      const pct=Math.round(d.score*100), color=d.score>=0.95?'var(--green)':d.score>=0.75?'var(--yellow,#f0c040)':'var(--red)';
+      matchEl.innerHTML = `<span style="color:${color};font-family:var(--mono)">${escHtml(d.match)}</span> <span style="color:var(--dim);font-size:11px">${pct}%</span>`;
+    } else {
+      matchEl.innerHTML = `<span style="color:var(--red);font-size:11px">No match${d.match?' — closest: '+escHtml(d.match)+' ('+Math.round((d.score||0)*100)+'%)':''}</span>`;
+    }
+  } catch(e) { if (matchEl) matchEl.innerHTML='<span style="color:var(--red)">Error</span>'; }
+}
+
+function bsKeydown(e, id) { if (e.key==='Enter') { e.preventDefault(); bsSubmit(id); } }
+
+async function bsSubmit(id) {
+  const input=document.getElementById('bsi-'+id), statusEl=document.getElementById('bss-'+id);
+  const whatnot=input?.value.trim();
+  if (!whatnot) return;
+  if (statusEl) statusEl.innerHTML='<span style="color:var(--dim)">matching...</span>';
+  // Always re-run fuzzy on submit to ensure discord_id is captured
+  try {
+    const fr = await fetch('/ui/binshow/fuzzy?whatnot_name='+encodeURIComponent(whatnot)).then(r=>r.json());
+    _bsMatchCache[id] = fr;
+    const matchEl = document.getElementById('bsm-'+id);
+    if (matchEl && fr.ok) {
+      const pct=Math.round(fr.score*100), color=fr.score>=0.95?'var(--green)':fr.score>=0.75?'var(--yellow,#f0c040)':'var(--red)';
+      matchEl.innerHTML=`<span style="color:${color};font-family:var(--mono)">${escHtml(fr.match)}</span> <span style="color:var(--dim);font-size:11px">${pct}%</span>`;
+    }
+  } catch(e) {}
+  const match=_bsMatchCache[id]||{}, discordName=match.ok?match.match:whatnot, discordId=match.ok?(match.discord_id||''):'';
+  if (statusEl) statusEl.innerHTML='<span style="color:var(--dim)">assigning...</span>';
+  const fd=new FormData();
+  fd.append('whatnot_name',whatnot); fd.append('discord_name',discordName); fd.append('discord_id',discordId);
+  try {
+    const d=await fetch('/ui/binshow/log/'+id+'/assign',{method:'POST',body:fd}).then(r=>r.json());
+    if (d.ok) {
+      if (statusEl) statusEl.innerHTML='<span style="color:var(--green)">✅ Assigned</span>';
+      if (input) { input.disabled=true; input.style.opacity='0.5'; }
+      bsLoadPreview(id, d.item_code);
+      const all=document.querySelectorAll('#binshow-body input:not([disabled])');
+      if (all.length) all[0].focus();
+    } else {
+      if (statusEl) statusEl.innerHTML=`<span style="color:var(--red);font-size:11px">${escHtml(d.error||'Failed')}</span>`;
+    }
+  } catch(e) { if (statusEl) statusEl.innerHTML='<span style="color:var(--red)">Network error</span>'; }
+}
+
+async function bsDelete(id) {
+  try {
+    const d=await fetch('/ui/binshow/log/'+id,{method:'DELETE'}).then(r=>r.json());
+    if (d.ok) {
+      document.getElementById('bsr-'+id)?.remove();
+      document.querySelectorAll('#binshow-body tr[id^="bsr-"]').forEach((tr,idx)=>{
+        const first=tr.querySelector('td'); if(first) first.textContent='#'+(idx+1);
+      });
+      toast('Row removed');
+    }
+  } catch(e) { toast('Network error','err'); }
+}
+
+async function bsOverride(id) {
+  const name=prompt('Enter correct Discord display name:');
+  if (!name) return;
+  _bsMatchCache[id]={ok:true,match:name.trim(),discord_id:'',score:1.0};
+  const matchEl=document.getElementById('bsm-'+id);
+  if (matchEl) matchEl.innerHTML=`<span style="color:var(--blue);font-family:var(--mono)">${escHtml(name)} (override)</span>`;
+  const input=document.getElementById('bsi-'+id);
+  if (input) { input.disabled=false; input.style.opacity='1'; }
+  bsSubmit(id);
+}
+
+async function bsLoadPreview(id, code) {
+  try {
+    const d=await fetch('/ui/binshow/preview?item_code='+code).then(r=>r.json());
+    const el=document.getElementById('bsp-'+id);
+    if (el&&d.url) el.innerHTML=`<img src="${d.url}" style="width:100%;height:100%;object-fit:cover" onerror="this.parentElement.innerHTML='—'">`;
+  } catch(e) {}
+}
+
+async function clearBinLog() {
+  if (!confirm('Clear the entire auction log?')) return;
+  try {
+    await fetch('/ui/binshow/log/clear',{method:'POST'});
+    document.getElementById('binshow-body').innerHTML='<tr><td colspan="7" style="text-align:center;color:var(--dim);padding:40px;font-style:italic">Waiting for host to type numbers in Discord...</td></tr>';
+    Object.keys(_bsMatchCache).forEach(k=>delete _bsMatchCache[k]);
+    toast('Auction log cleared');
+  } catch(e) { toast('Network error','err'); }
+}
+// ── Trade sidebar functions (available on all pages) ─────────────────────────
 async function tradeLock() {
   const btn = document.getElementById('btn-trade-lock');
   if (!btn) return;
@@ -1870,7 +2015,4 @@ async function closeTradeChannels() {
     if (btn && d.value === '1') btn.textContent = '🔓 Unlock Trades';
   } catch(e) {}
 })();
-
 </script>
-</body>
-</html>

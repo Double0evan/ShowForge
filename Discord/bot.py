@@ -46,6 +46,8 @@ CLAIMS_SFW_CHANNEL_ID   = get_int_env("CLAIMS_SFW_CHANNEL_ID", 0)
 CLAIMS_NSFW_CHANNEL_ID  = get_int_env("CLAIMS_NSFW_CHANNEL_ID", 0)
 VERIFY_CHANNEL_ID       = get_int_env("VERIFY_CHANNEL_ID", 0)
 VERIFIED_ROLE_ID        = get_int_env("VERIFIED_ROLE_ID", 0)
+UNVERIFIED_ROLE_ID      = get_int_env("UNVERIFIED_ROLE_ID", 0)
+NEWCOMER_ROLE_ID        = get_int_env("NEWCOMER_ROLE_ID", 0)
 UPLOAD_THREAD_RAW_SFW   = get_int_env("UPLOAD_THREAD_RAW_SFW")
 UPLOAD_THREAD_WM_SFW    = get_int_env("UPLOAD_THREAD_WM_SFW")
 UPLOAD_THREAD_RAW_NSFW  = get_int_env("UPLOAD_THREAD_RAW_NSFW")
@@ -99,7 +101,7 @@ tree            = app_commands.CommandTree(client)
 
 # ── Guest merge ───────────────────────────────────────────────────────────────
 
-def _try_merge_guest(member: discord.Member) -> None:
+async def _try_merge_guest(member: discord.Member) -> None:
     try:
         r = requests.get(
             f"{BACKEND_BASE_URL}/users/find_pending",
@@ -112,9 +114,9 @@ def _try_merge_guest(member: discord.Member) -> None:
         if not data.get("found"):
             return
 
-        pending_id          = data["user_id"]
-        balance             = data.get("balance", 0)
-        discord_internal_id = core.upsert_discord_user(member.id, member.display_name)
+        pending_id              = data["user_id"]
+        balance                 = data.get("balance", 0)
+        discord_internal_id, _  = core.upsert_discord_user(member.id, member.display_name)
 
         if balance > 0:
             requests.post(
@@ -126,6 +128,22 @@ def _try_merge_guest(member: discord.Member) -> None:
         else:
             print(f"[MERGE] Linked pending#{pending_id} → discord#{discord_internal_id} ({member.display_name})")
 
+        # Open trade channel now that we have a real Discord member
+        if TRADE_CATEGORY_ID and member.guild:
+            try:
+                from Trade.trade_hook import on_item_assigned_trade
+                from Core.show_service import require_active_show
+                from Trade.db.trade_db import ensure_trade_tables
+                active = require_active_show()
+                ensure_trade_tables  # already imported in trade_hook
+                await on_item_assigned_trade(
+                    active.db_path, member.guild, member,
+                    TRADE_CATEGORY_ID, TRADE_ANNOUNCE_CHANNEL_ID or None,
+                )
+                print(f"[MERGE] Trade channel opened for {member.display_name}")
+            except Exception as e:
+                print(f"[MERGE] Trade channel error for {member.display_name}: {e}")
+
     except Exception as e:
         print(f"[MERGE] Error for {member.display_name}: {e}")
 
@@ -136,7 +154,90 @@ def _try_merge_guest(member: discord.Member) -> None:
 async def on_member_join(member: discord.Member):
     member_cache.upsert_member(member)
     print(f"[MEMBER] Joined: {member.display_name}")
-    _try_merge_guest(member)
+
+    # Add unverified role to gate access until they verify
+    if UNVERIFIED_ROLE_ID:
+        try:
+            unverified = member.guild.get_role(UNVERIFIED_ROLE_ID)
+            if unverified:
+                await member.add_roles(unverified, reason="New member join gating")
+        except discord.Forbidden:
+            pass
+
+    # Send welcome message in verify channel
+    if VERIFY_CHANNEL_ID:
+        ch = member.guild.get_channel(VERIFY_CHANNEL_ID)
+        if isinstance(ch, discord.TextChannel):
+            try:
+                await ch.send(
+                    f"👋 Welcome {member.mention}!\n"
+                    f"Please type your **Whatnot username** in this channel to get verified.\n"
+                    f"Once verified, you'll get full access to the server."
+                )
+            except discord.Forbidden:
+                pass
+
+    await _try_merge_guest(member)
+
+
+@client.event
+async def on_message(message: discord.Message):
+    """Handle verify channel — user types Whatnot username to get verified."""
+    if message.author.bot:
+        return
+    if not message.guild:
+        return
+    if not VERIFY_CHANNEL_ID or message.channel.id != VERIFY_CHANNEL_ID:
+        return
+
+    member = message.guild.get_member(message.author.id)
+    if not member:
+        return
+
+    # Only act if they still have the Unverified role
+    if UNVERIFIED_ROLE_ID:
+        unverified_role = message.guild.get_role(UNVERIFIED_ROLE_ID)
+        if unverified_role and unverified_role not in member.roles:
+            return  # Already verified, ignore
+
+    # Validate the Whatnot username
+    raw = message.content.strip()
+    if not raw or len(raw) < 2 or len(raw) > 32:
+        return
+    lowered = raw.lower()
+    if "@everyone" in lowered or "@here" in lowered:
+        return
+    whatnot_name = " ".join(raw.split())  # normalize whitespace
+
+    # Set nickname to their Whatnot username
+    try:
+        await member.edit(nick=whatnot_name, reason="Whatnot verification")
+    except discord.Forbidden:
+        await message.channel.send("❌ I can't change your nickname — check bot role permissions.")
+        return
+
+    # Swap roles: remove Unverified, add Verified + Newcomer
+    try:
+        roles_to_remove = []
+        roles_to_add    = []
+        if UNVERIFIED_ROLE_ID:
+            r = message.guild.get_role(UNVERIFIED_ROLE_ID)
+            if r: roles_to_remove.append(r)
+        if VERIFIED_ROLE_ID:
+            r = message.guild.get_role(VERIFIED_ROLE_ID)
+            if r: roles_to_add.append(r)
+        if NEWCOMER_ROLE_ID:
+            r = message.guild.get_role(NEWCOMER_ROLE_ID)
+            if r: roles_to_add.append(r)
+        if roles_to_remove:
+            await member.remove_roles(*roles_to_remove, reason="Verified")
+        if roles_to_add:
+            await member.add_roles(*roles_to_add, reason="Verified")
+    except discord.Forbidden:
+        pass
+
+    await message.channel.send(f"✅ Verified! Welcome, **{whatnot_name}**.")
+    print(f"[VERIFY] {member} verified as {whatnot_name!r}")
 
 
 @client.event
@@ -152,12 +253,14 @@ async def on_member_update(before: discord.Member, after: discord.Member):
     after_verified  = has_verified_role(after)
     if not before_verified and after_verified:
         print(f"[MEMBER] Verified: {after.display_name}")
-        _try_merge_guest(after)
+        await _try_merge_guest(after)
     if before.display_name != after.display_name:
         try:
-            core.upsert_discord_user(after.id, after.display_name)
+            _, _ = core.upsert_discord_user(after.id, after.display_name)
         except Exception:
             pass
+        # Name change may now match a pending guest — attempt merge + trade channel
+        await _try_merge_guest(after)
 
 
 # ── Claim helpers ─────────────────────────────────────────────────────────────
@@ -243,7 +346,7 @@ async def on_interaction(interaction: discord.Interaction):
     display_name = member.display_name
 
     try:
-        internal_user_id = core.upsert_discord_user(interaction.user.id, display_name)
+        internal_user_id, _ = core.upsert_discord_user(interaction.user.id, display_name)
     except Exception:
         await interaction.followup.send("Backend error registering your user.", ephemeral=True)
         return
@@ -366,7 +469,7 @@ def api_add_guest(payload: dict):
 
     try:
         if discord_id:
-            internal_id = core.upsert_discord_user(int(discord_id), display_name)
+            internal_id, _ = core.upsert_discord_user(int(discord_id), display_name)
         else:
             internal_id = core.upsert_guest_user(display_name, kind=kind, note=note)
         return {"ok": True, "user_id": internal_id, "display_name": display_name}
@@ -770,40 +873,33 @@ def api_bin_clear():
 
 @client.event
 async def on_ready():
-    try:
-        if GUILD_ID:
-            guild = discord.Object(id=GUILD_ID)
-            tree.copy_global_to(guild=guild)
-            await tree.sync(guild=guild)
-            print(f"✅ Commands synced to guild {GUILD_ID}")
-        else:
-            await tree.sync()
-            print("✅ Commands synced globally")
-    except Exception as e:
-        print(f"❌ Command sync failed: {e}")
-
-    if GUILD_ID:
-        guild = client.get_guild(GUILD_ID)
-        if guild:
-            count = 0
-            async for member in guild.fetch_members(limit=None):
-                member_cache.upsert_member(member)
-                count += 1
-            print(f"✅ Member cache loaded: {count} members")
-
     print(f"Logged in as {client.user} | Backend: {BACKEND_BASE_URL}")
 
-    # Store the Discord event loop so bot API endpoints can submit coroutines to it
+    # Store event loop first
     import asyncio
     global _discord_loop
     _discord_loop = asyncio.get_running_loop()
 
-    # Register bin show listener
+    # Register bin listener
     from Discord.bin_listener import register_bin_listener
     register_bin_listener(client, core, bot_api_url="http://127.0.0.1:8001")
     print("✅ Bin listener registered")
 
-    # Init trade system
+    # Register persistent views so buttons survive restarts
+    try:
+        from Trade.ui.trade_views import (
+            TradeHomeView, TradeListingsView, TradeOfferResponseView, PublicListingView
+        )
+        from pathlib import Path as _Path
+        client.add_view(TradeHomeView(None, 0, 0, 0, 1))
+        client.add_view(TradeListingsView(None, 0))
+        client.add_view(TradeOfferResponseView(None, "dummy", 0))
+        client.add_view(PublicListingView(None, "dummy", 0, "", [], [], None))
+        print("✅ Persistent trade views registered")
+    except Exception as e:
+        print(f"⚠️  Could not register persistent views: {e}")
+
+    # Register trade commands BEFORE sync so Discord sees them
     if TRADE_CATEGORY_ID:
         try:
             from Trade.trade_hook import register_trade_commands, init_trade_tables
@@ -818,9 +914,8 @@ async def on_ready():
                     announce_channel_id=TRADE_ANNOUNCE_CHANNEL_ID or None,
                 )
                 print("✅ Trade system registered")
-                
             except Exception:
-                print("⚠️  Trade: no active show at startup — trade commands registered without DB (will init on first use)")
+                print("⚠️  Trade: no active show at startup — trade commands registered without DB")
                 register_trade_commands(
                     tree,
                     db_path=None,
@@ -831,6 +926,29 @@ async def on_ready():
             print(f"❌ Trade system failed to load: {e}")
     else:
         print("ℹ️  TRADE_CATEGORY_ID not set — trade system disabled")
+
+    # Sync AFTER all commands are in the tree
+    try:
+        if GUILD_ID:
+            guild_obj = discord.Object(id=GUILD_ID)
+            tree.copy_global_to(guild=guild_obj)
+            await tree.sync(guild=guild_obj)
+            print(f"✅ Commands synced to guild {GUILD_ID}")
+        else:
+            await tree.sync()
+            print("✅ Commands synced globally")
+    except Exception as e:
+        print(f"❌ Command sync failed: {e}")
+
+    # Load member cache
+    if GUILD_ID:
+        guild = client.get_guild(GUILD_ID)
+        if guild:
+            count = 0
+            async for member in guild.fetch_members(limit=None):
+                member_cache.upsert_member(member)
+                count += 1
+            print(f"✅ Member cache loaded: {count} members")
 
     def run_api():
         uvicorn.run(app, host="127.0.0.1", port=8001, log_level="warning")
@@ -971,6 +1089,44 @@ def api_trade_refresh_all():
 
     asyncio.run_coroutine_threadsafe(_refresh_all(), _discord_loop)
     return {"ok": True, "message": "Refresh started in background — check bot terminal for progress"}
+
+
+@app.post("/trade/open_for_user")
+def api_trade_open_for_user(discord_user_id: str):
+    """Open/refresh trade channel for a Discord user by ID. Called from Bin Manager assign."""
+    import asyncio
+
+    async def _open():
+        try:
+            if not TRADE_CATEGORY_ID:
+                print("[TRADE] open_for_user: TRADE_CATEGORY_ID not set")
+                return
+            guild = client.get_guild(GUILD_ID)
+            if not guild:
+                print("[TRADE] open_for_user: guild not found")
+                return
+            member = guild.get_member(int(discord_user_id))
+            if not member:
+                # Not in cache — try fetching directly
+                try:
+                    member = await guild.fetch_member(int(discord_user_id))
+                except Exception as fe:
+                    print(f"[TRADE] open_for_user: member {discord_user_id} not found: {fe}")
+                    return
+            from Core.show_service import require_active_show
+            from Trade.trade_hook import on_item_assigned_trade
+            active = require_active_show()
+            print(f"[TRADE] Opening trade channel for {member.display_name}")
+            await on_item_assigned_trade(
+                active.db_path, guild, member,
+                TRADE_CATEGORY_ID, TRADE_ANNOUNCE_CHANNEL_ID or None,
+            )
+            print(f"[TRADE] Trade channel opened for {member.display_name}")
+        except Exception as e:
+            print(f"[TRADE] open_for_user error: {e}")
+
+    asyncio.run_coroutine_threadsafe(_open(), _discord_loop)
+    return {"ok": True}
 
 
 if __name__ == "__main__":

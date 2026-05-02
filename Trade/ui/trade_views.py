@@ -242,19 +242,61 @@ class TradeListingsView(OwnerOnlyMixin, discord.ui.View):
 
     @discord.ui.button(label="View Incoming", style=discord.ButtonStyle.primary, row=0, custom_id="trade_listings_view_incoming")
     async def view_incoming(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await interaction.response.send_message("Incoming offers — coming soon.", ephemeral=True)
+        db = _get_db_path()
+        with db_session(db) as conn:
+            from Trade.db.trade_db import get_user_incoming_offers
+            rows = [dict(r) for r in get_user_incoming_offers(conn, self.user_id)]
+        if not rows:
+            await interaction.response.send_message("No incoming offers right now.", ephemeral=True)
+            return
+        await _show_incoming_offers(interaction, db, self.user_id, rows, page=0)
 
     @discord.ui.button(label="View Sent", style=discord.ButtonStyle.secondary, row=0, custom_id="trade_listings_view_sent")
     async def view_sent(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await interaction.response.send_message("Sent offers — coming soon.", ephemeral=True)
+        db = _get_db_path()
+        with db_session(db) as conn:
+            from Trade.db.trade_db import get_user_sent_offers
+            rows = [dict(r) for r in get_user_sent_offers(conn, self.user_id)]
+        if not rows:
+            await interaction.response.send_message("No sent offers.", ephemeral=True)
+            return
+        await _show_sent_offers(interaction, db, self.user_id, rows, page=0)
 
     @discord.ui.button(label="Edit Listing", style=discord.ButtonStyle.secondary, row=1, custom_id="trade_listings_edit_listing")
     async def edit_listing(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await interaction.response.send_message("Edit listing — coming soon.", ephemeral=True)
+        db = _get_db_path()
+        with db_session(db) as conn:
+            from Trade.services.trade_service import _get_user_active_listing_rows
+            listings = _get_user_active_listing_rows(conn, self.user_id)
+        if not listings:
+            await interaction.response.send_message("You have no active listings to edit.", ephemeral=True)
+            return
+        if len(listings) == 1:
+            await _show_edit_listing(interaction, db, self.user_id, dict(listings[0]))
+        else:
+            await interaction.response.send_message(
+                "Select a listing to edit:",
+                view=ListingSelectView(db, self.user_id, listings, mode="edit"),
+                ephemeral=True,
+            )
 
     @discord.ui.button(label="Cancel Listing", style=discord.ButtonStyle.danger, row=1, custom_id="trade_listings_cancel_listing")
     async def cancel_listing(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await interaction.response.send_message("Cancel listing — coming soon.", ephemeral=True)
+        db = _get_db_path()
+        with db_session(db) as conn:
+            from Trade.services.trade_service import _get_user_active_listing_rows
+            listings = _get_user_active_listing_rows(conn, self.user_id)
+        if not listings:
+            await interaction.response.send_message("You have no active listings to cancel.", ephemeral=True)
+            return
+        if len(listings) == 1:
+            await _confirm_cancel_listing(interaction, db, self.user_id, dict(listings[0]))
+        else:
+            await interaction.response.send_message(
+                "Select a listing to cancel:",
+                view=ListingSelectView(db, self.user_id, listings, mode="cancel"),
+                ephemeral=True,
+            )
 
 
 # ── Offer Response ────────────────────────────────────────────────────────────
@@ -502,6 +544,323 @@ async def _show_user_inventory(
         max_values=3, title=f"{target_member.display_name}'s Cards — Select What You Want",
         on_confirm=on_offer_cards, edit_existing=edit_existing,
     )
+
+
+# ── Incoming Offers ──────────────────────────────────────────────────────────
+
+async def _show_incoming_offers(interaction: discord.Interaction, db_path, user_id: int, rows: list, page: int, edit_existing: bool = False):
+    row    = rows[page]
+    total  = len(rows)
+    offer_id    = row["offer_id"]
+    sender_id   = int(row["sender_user_id"])
+    offer_codes = [c.strip() for c in row["offer_codes"].split(",")] if row.get("offer_codes") else []
+
+    sender_m = interaction.guild.get_member(sender_id) if interaction.guild else None
+    sender_display = sender_m.display_name if sender_m else f"<@{sender_id}>"
+
+    with db_session(db_path) as conn:
+        from Trade.db.trade_db import get_offer_requested_codes, search_card_by_item_code
+        requested = get_offer_requested_codes(conn, offer_id)
+        preview_url = None
+        if offer_codes:
+            r = search_card_by_item_code(conn, offer_codes[0])
+            if r: preview_url = dict(r).get("image_url")
+
+    from Trade.ui.trade_embeds import build_offer_received_embed
+    embed = build_offer_received_embed(
+        offer_id=offer_id, sender_display=sender_display,
+        item_codes=offer_codes, requested_codes=requested or None,
+        preview_code=offer_codes[0] if offer_codes else None,
+        preview_url=preview_url, index=0, total=len(offer_codes) or 1,
+    )
+    embed.set_footer(text=f"Offer {offer_id}  ·  {page+1} of {total} incoming offers")
+
+    view = IncomingOfferPageView(db_path, user_id, rows, page)
+    if edit_existing:
+        await interaction.response.edit_message(embed=embed, view=view, content=None)
+    else:
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
+class IncomingOfferPageView(discord.ui.View):
+    def __init__(self, db_path, user_id: int, rows: list, page: int):
+        super().__init__(timeout=120)
+        self.db_path  = db_path
+        self.user_id  = user_id
+        self.rows     = rows
+        self.page     = page
+        self.prev_btn.disabled = page == 0
+        self.next_btn.disabled = page >= len(rows) - 1
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("These are not your offers.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="◀ Prev", style=discord.ButtonStyle.secondary)
+    async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _show_incoming_offers(interaction, _get_db_path(), self.user_id, self.rows, self.page - 1, edit_existing=True)
+
+    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary)
+    async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _show_incoming_offers(interaction, _get_db_path(), self.user_id, self.rows, self.page + 1, edit_existing=True)
+
+    @discord.ui.button(label="✅ Accept", style=discord.ButtonStyle.success)
+    async def accept_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        from Trade.services.trade_service import handle_offer_accepted
+        await interaction.response.defer(ephemeral=True)
+        await handle_offer_accepted(_get_db_path(), interaction, self.rows[self.page]["offer_id"])
+
+    @discord.ui.button(label="❌ Decline", style=discord.ButtonStyle.danger)
+    async def decline_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        from Trade.services.trade_service import handle_offer_declined
+        await interaction.response.defer(ephemeral=True)
+        await handle_offer_declined(_get_db_path(), interaction, self.rows[self.page]["offer_id"])
+
+
+# ── Sent Offers ───────────────────────────────────────────────────────────────
+
+async def _show_sent_offers(interaction: discord.Interaction, db_path, user_id: int, rows: list, page: int, edit_existing: bool = False):
+    row   = rows[page]
+    total = len(rows)
+    offer_id     = row["offer_id"]
+    receiver_id  = int(row["receiver_user_id"])
+    offer_codes  = [c.strip() for c in row["offer_codes"].split(",")] if row.get("offer_codes") else []
+    status       = row["status"]
+
+    receiver_m = interaction.guild.get_member(receiver_id) if interaction.guild else None
+    receiver_display = receiver_m.display_name if receiver_m else f"<@{receiver_id}>"
+
+    status_colors = {"pending": 0xFAA61A, "accepted": 0x3BA55C, "declined": 0xED4245}
+    status_emoji  = {"pending": "⏳", "accepted": "✅", "declined": "❌"}
+
+    embed = discord.Embed(
+        title=f"{status_emoji.get(status, '')} Sent Offer — {status.capitalize()}",
+        color=status_colors.get(status, 0x87898C),
+    )
+    embed.add_field(name="To", value=receiver_display, inline=True)
+    embed.add_field(name="Status", value=status.capitalize(), inline=True)
+    embed.add_field(
+        name="You Offered",
+        value="\n".join(f"• `{c}`" for c in offer_codes) or "_none_",
+        inline=False,
+    )
+    embed.set_footer(text=f"Offer {offer_id}  ·  {page+1} of {total} sent offers")
+
+    view = SentOfferPageView(db_path, user_id, rows, page)
+    if edit_existing:
+        await interaction.response.edit_message(embed=embed, view=view, content=None)
+    else:
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
+class SentOfferPageView(discord.ui.View):
+    def __init__(self, db_path, user_id: int, rows: list, page: int):
+        super().__init__(timeout=120)
+        self.db_path = db_path
+        self.user_id = user_id
+        self.rows    = rows
+        self.page    = page
+        self.prev_btn.disabled   = page == 0
+        self.next_btn.disabled   = page >= len(rows) - 1
+        # Only allow cancel if the current offer is still pending
+        self.cancel_btn.disabled = rows[page]["status"] != "pending"
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("These are not your offers.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="◀ Prev", style=discord.ButtonStyle.secondary)
+    async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _show_sent_offers(interaction, _get_db_path(), self.user_id, self.rows, self.page - 1, edit_existing=True)
+
+    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary)
+    async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _show_sent_offers(interaction, _get_db_path(), self.user_id, self.rows, self.page + 1, edit_existing=True)
+
+    @discord.ui.button(label="🗑 Cancel Offer", style=discord.ButtonStyle.danger)
+    async def cancel_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        offer_id = self.rows[self.page]["offer_id"]
+        db = _get_db_path()
+        with db_session(db) as conn:
+            from Trade.db.trade_db import resolve_offer
+            rows_affected = resolve_offer(conn, offer_id, "declined")
+        if rows_affected:
+            await interaction.response.edit_message(
+                content=f"Offer `{offer_id}` cancelled.", embed=None, view=None
+            )
+        else:
+            await interaction.response.send_message("Could not cancel — offer may have already been resolved.", ephemeral=True)
+
+
+# ── Listing Select (for edit / cancel when user has multiple listings) ────────
+
+class ListingSelectView(discord.ui.View):
+    def __init__(self, db_path, user_id: int, listings: list, mode: str):
+        super().__init__(timeout=120)
+        self.user_id = user_id
+        options = []
+        for row in listings[:25]:
+            row = dict(row)
+            codes = row.get("item_codes", "") or ""
+            label = f"{codes[:50]}" if codes else row["listing_id"]
+            lf    = row.get("looking_for") or "Open to offers"
+            options.append(discord.SelectOption(
+                label=label[:100], value=row["listing_id"],
+                description=f"↳ {lf}"[:100],
+            ))
+        sel = discord.ui.Select(placeholder="Select a listing", options=options)
+
+        async def callback(inter: discord.Interaction):
+            listing_id = sel.values[0]
+            listing    = next((dict(r) for r in listings if r["listing_id"] == listing_id), None)
+            if mode == "cancel":
+                await _confirm_cancel_listing(inter, _get_db_path(), user_id, listing)
+            else:
+                await _show_edit_listing(inter, _get_db_path(), user_id, listing)
+
+        sel.callback = callback
+        self.add_item(sel)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("This is not your listing.", ephemeral=True)
+            return False
+        return True
+
+
+async def _confirm_cancel_listing(interaction: discord.Interaction, db_path, user_id: int, listing: dict):
+    listing_id = listing["listing_id"]
+    codes      = listing.get("item_codes", "") or ""
+    embed = discord.Embed(
+        title="Cancel Listing?",
+        description=f"Listing `{listing_id}`\nCards: {codes}\n\nThis will remove the listing and any public announcement.",
+        color=0xED4245,
+    )
+    view = ConfirmCancelListingView(db_path, user_id, listing_id)
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
+class ConfirmCancelListingView(discord.ui.View):
+    def __init__(self, db_path, user_id: int, listing_id: str):
+        super().__init__(timeout=60)
+        self.user_id    = user_id
+        self.listing_id = listing_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Not your listing.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Yes, Cancel Listing", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        db = _get_db_path()
+        with db_session(db) as conn:
+            from Trade.db.trade_db import close_listing, get_listing_public_message, delete_listing_public_message
+            pub = get_listing_public_message(conn, self.listing_id)
+            close_listing(conn, self.listing_id)
+            if pub:
+                delete_listing_public_message(conn, self.listing_id)
+
+        # Delete public announcement if it exists
+        if pub and interaction.guild:
+            try:
+                ch  = interaction.guild.get_channel(int(pub["channel_id"])) or await interaction.guild.fetch_channel(int(pub["channel_id"]))
+                msg = await ch.fetch_message(int(pub["message_id"]))
+                await msg.delete()
+            except Exception:
+                pass
+
+        # Refresh listings message
+        try:
+            from Trade.services.trade_service import refresh_trade_listings
+            from Trade.db.trade_db import get_trade_channel_id
+            with db_session(db) as conn:
+                ch_id = get_trade_channel_id(conn, interaction.guild.id, self.user_id)
+            if ch_id:
+                ch = interaction.guild.get_channel(ch_id)
+                if ch:
+                    await refresh_trade_listings(db, ch, self.user_id)
+        except Exception:
+            pass
+
+        await interaction.response.edit_message(
+            content=f"Listing `{self.listing_id}` cancelled.", embed=None, view=None
+        )
+
+    @discord.ui.button(label="Never mind", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="Cancelled.", embed=None, view=None)
+
+
+# ── Edit Listing ──────────────────────────────────────────────────────────────
+
+async def _show_edit_listing(interaction: discord.Interaction, db_path, user_id: int, listing: dict):
+    """Open card picker pre-selected with current listing cards."""
+    listing_id  = listing["listing_id"]
+    current_lf  = listing.get("looking_for") or ""
+
+    with db_session(db_path) as conn:
+        from Trade.db.trade_db import get_listing_item_codes
+        current_codes = get_listing_item_codes(conn, listing_id)
+
+    async def on_cards_selected(inter: discord.Interaction, new_codes: list[str]):
+        await inter.response.send_modal(
+            EditListingLookingForModal(db_path, user_id, listing_id, new_codes, current_lf)
+        )
+
+    await _show_card_picker(
+        interaction, db_path, user_id, user_id,
+        max_values=3, title=f"Edit Listing — Select Cards",
+        on_confirm=on_cards_selected, edit_existing=True,
+    )
+
+
+class EditListingLookingForModal(discord.ui.Modal, title="Edit Listing"):
+    looking_for = discord.ui.TextInput(
+        label="Looking For",
+        placeholder="Alt art, specific codes, or open to offers",
+        required=False, max_length=200, style=discord.TextStyle.short,
+    )
+
+    def __init__(self, db_path, user_id: int, listing_id: str, new_codes: list, current_lf: str):
+        super().__init__()
+        self.user_id    = user_id
+        self.listing_id = listing_id
+        self.new_codes  = new_codes
+        self.looking_for.default = current_lf
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        db = _get_db_path()
+        new_lf = str(self.looking_for).strip() or None
+        with db_session(db) as conn:
+            from Trade.db.trade_db import close_listing, get_listing_public_message, delete_listing_public_message
+            pub = get_listing_public_message(conn, self.listing_id)
+            close_listing(conn, self.listing_id)
+            if pub:
+                delete_listing_public_message(conn, self.listing_id)
+
+        # Delete old public announcement
+        if pub and interaction.guild:
+            try:
+                ch  = interaction.guild.get_channel(int(pub["channel_id"])) or await interaction.guild.fetch_channel(int(pub["channel_id"]))
+                msg = await ch.fetch_message(int(pub["message_id"]))
+                await msg.delete()
+            except Exception:
+                pass
+
+        # Re-create listing with new cards + looking_for
+        from Trade.services.trade_service import handle_create_listing
+        await interaction.response.defer(ephemeral=True)
+        await handle_create_listing(
+            db, interaction, interaction.guild.id, self.user_id,
+            self.new_codes, new_lf,
+            announce_channel_id=None,  # announce_channel_id not available here — refresh will handle it
+        )
 
 
 # ── Looking For Modal (after card selection for listing) ─────────────────────

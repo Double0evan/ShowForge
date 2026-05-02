@@ -110,3 +110,66 @@ def clear_queue() -> int:
         return cur.rowcount
     finally:
         conn.close()
+
+
+# ── Auction Log ───────────────────────────────────────────────────────────────
+# Tracks card numbers in the order the host typed them (auction order).
+
+def log_auction(card_number: int) -> int:
+    """Append a card number to the auction log. Returns the auction sequence number."""
+    conn = _connect()
+    try:
+        conn.execute("""CREATE TABLE IF NOT EXISTS auction_log (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            card_number INTEGER NOT NULL,
+            winner_name TEXT,
+            discord_name TEXT,
+            claimed     INTEGER NOT NULL DEFAULT 0,
+            created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+        )""")
+        cur = conn.execute(
+            "INSERT INTO auction_log (card_number) VALUES (?)", (card_number,)
+        )
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def get_auction_log() -> list[dict]:
+    conn = _connect()
+    try:
+        conn.execute("""CREATE TABLE IF NOT EXISTS auction_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, card_number INTEGER NOT NULL,
+            winner_name TEXT, discord_name TEXT, claimed INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )""")
+        rows = conn.execute(
+            "SELECT id, card_number, winner_name, discord_name, claimed, created_at FROM auction_log ORDER BY id ASC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def update_auction_winner(auction_id: int, winner_name: str, discord_name: str) -> bool:
+    conn = _connect()
+    try:
+        cur = conn.execute(
+            "UPDATE auction_log SET winner_name=?, discord_name=?, claimed=1 WHERE id=?",
+            (winner_name, discord_name, auction_id)
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def clear_auction_log() -> int:
+    conn = _connect()
+    try:
+        cur = conn.execute("DELETE FROM auction_log")
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()

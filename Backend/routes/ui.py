@@ -371,6 +371,412 @@ async def ui_claims_summary(rating: str = Form(...)):
         return {"ok": False, "error": str(e)}
 
 
+# ── Bin Show Manager ─────────────────────────────────────────────────────────
+
+@router.get("/ui/binshow")
+def ui_binshow(request: Request):
+    ctx = _base_ctx("binshow", request)
+    active = shows.get_active()
+    if active:
+        items = list_inventory(active.db_path)
+        ctx["items"] = {i["item_code"]: i for i in items}
+    return templates.TemplateResponse("index.html", ctx)
+
+
+@router.get("/ui/binshow/fuzzy")
+def ui_binshow_fuzzy(whatnot_name: str):
+    """Fuzzy match a Whatnot username against verified Discord members via bot API."""
+    import requests as _req, re
+    # Fetch members from bot API (port 8001) — backend has no direct Discord access
+    try:
+        r = _req.get("http://127.0.0.1:8001/members", timeout=5)
+        data = r.json()
+        members = data.get("verified", []) + data.get("unverified", [])
+    except Exception as e:
+        return {"ok": False, "match": None, "score": 0, "error": str(e)}
+
+    def _normalize(s):
+        return re.sub(r"[^a-z0-9]", "", s.lower())
+
+    def _similarity(a, b):
+        if not a or not b: return 0.0
+        if a == b: return 1.0
+        m, n = len(a), len(b)
+        dp = [[0]*(n+1) for _ in range(m+1)]
+        for i in range(1, m+1):
+            for j in range(1, n+1):
+                dp[i][j] = dp[i-1][j-1]+1 if a[i-1]==b[j-1] else max(dp[i-1][j], dp[i][j-1])
+        return dp[m][n] / max(m, n)
+
+    target = _normalize(whatnot_name.strip())
+    if not target:
+        return {"ok": False, "match": None, "score": 0}
+
+    try:
+        import requests as _req2
+        r2 = _req2.get("http://127.0.0.1:8001/members", timeout=5)
+        data2 = r2.json()
+        members = data2.get("verified", []) + data2.get("unverified", [])
+    except Exception as e2:
+        return {"ok": False, "match": None, "score": 0, "error": str(e2)}
+    best_name, best_id, best_score = None, None, 0.0
+
+    for m in members:
+        norm = _normalize(m["display_name"])
+        if norm == target:
+            return {"ok": True, "match": m["display_name"], "discord_id": m["discord_id"], "score": 1.0}
+        score = _similarity(target, norm)
+        # Suffix boost
+        if len(target) >= 4 and norm.endswith(target):
+            score = max(score, 0.88)
+        parts = norm.split("_") if "_" in norm else []
+        if parts and target in parts:
+            score = max(score, 0.92)
+        if score > best_score:
+            best_score, best_name, best_id = score, m["display_name"], m["discord_id"]
+
+    if best_score >= 0.75:
+        return {"ok": True, "match": best_name, "discord_id": best_id, "score": round(best_score, 2)}
+    return {"ok": False, "match": best_name, "discord_id": best_id, "score": round(best_score, 2)}
+
+
+@router.get("/ui/binshow/log")
+def ui_binshow_log():
+    """Return the auction log in order."""
+    from Core.bin_queue import get_auction_log
+    return {"ok": True, "rows": get_auction_log()}
+
+
+@router.delete("/ui/binshow/log/{auction_id}")
+def ui_binshow_log_delete(auction_id: int):
+    """Remove a row from the auction log (wrong number typed)."""
+    from Core.bin_queue import _connect
+    conn = _connect()
+    try:
+        cur = conn.execute("DELETE FROM auction_log WHERE id = ?", (auction_id,))
+        conn.commit()
+        return {"ok": True, "deleted": cur.rowcount > 0}
+    finally:
+        conn.close()
+
+
+@router.post("/ui/binshow/log/{auction_id}/assign")
+def ui_binshow_log_assign(
+    auction_id: int,
+    whatnot_name: str = Form(...),
+    discord_name: str = Form(...),
+    discord_id:   str = Form(""),
+):
+    """Assign a winner to an auction log entry and create the claim."""
+    active       = require_active_show()
+    whatnot_name = whatnot_name.strip()
+    discord_name = discord_name.strip()
+
+    # Get the card number for this auction
+    from Core.bin_queue import _connect, update_auction_winner
+    conn = _connect()
+    try:
+        row = conn.execute("SELECT card_number FROM auction_log WHERE id = ?", (auction_id,)).fetchone()
+    finally:
+        conn.close()
+
+    if not row:
+        return {"ok": False, "error": "Auction entry not found"}
+
+    card_number = row["card_number"]
+    item_code   = f"N{card_number:03d}"
+
+    try:
+        from Core.db import db_session
+        from Core.normalize import normalize_name
+        from Core.voucher_service import award_voucher
+        from Core.claim_service import create_claim, ClaimError
+        from datetime import datetime, timezone
+
+        def _now():
+            return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+        with db_session(active.db_path) as conn2:
+            norm = normalize_name(discord_name)
+            user_row = None
+            # Always try discord_id first — most reliable
+            if discord_id:
+                user_row = conn2.execute(
+                    "SELECT id FROM users WHERE discord_user_id = ? LIMIT 1", (str(discord_id),)
+                ).fetchone()
+            # Fall back to normalized name, prefer discord kind
+            if not user_row:
+                user_row = conn2.execute(
+                    "SELECT id FROM users WHERE normalized_name = ? AND kind = 'discord' LIMIT 1",
+                    (norm,)
+                ).fetchone()
+            # Last resort — any kind
+            if not user_row:
+                user_row = conn2.execute(
+                    "SELECT id FROM users WHERE normalized_name = ? LIMIT 1", (norm,)
+                ).fetchone()
+            if user_row:
+                user_id = user_row["id"]
+            else:
+                # Create pending user — will merge when they verify
+                cur2 = conn2.execute(
+                    "INSERT INTO users (kind, discord_user_id, display_name, normalized_name, created_at) "
+                    "VALUES ('pending', ?, ?, ?, datetime('now'))",
+                    (discord_id or None, discord_name, norm),
+                )
+                user_id = cur2.lastrowid
+
+            existing = conn2.execute(
+                "SELECT status FROM inventory_items WHERE item_code = ?", (item_code,)
+            ).fetchone()
+            if not existing:
+                now = _now()
+                conn2.execute(
+                    "INSERT INTO inventory_items (item_code, status, post_mode, created_at, updated_at) "
+                    "VALUES (?, 'available', 'claim', ?, ?)",
+                    (item_code, now, now),
+                )
+            elif existing["status"] not in ("available",):
+                return {"ok": False, "error": f"{item_code} is already {existing['status']}"}
+
+        award_voucher(active.db_path, user_id=user_id, reason="STAFF_ADJUST",
+                      note=f"Bin auction #{auction_id} card {item_code}")
+        create_claim(active.db_path, item_code=item_code, user_id=user_id,
+                     source="bin", auction_number=str(auction_id))
+        update_auction_winner(auction_id, whatnot_name, discord_name)
+
+        # Ensure the user record has discord_user_id set
+        if discord_id:
+            with db_session(active.db_path) as conn4:
+                conn4.execute(
+                    "UPDATE users SET discord_user_id = ?, kind = 'discord' WHERE id = ? AND (discord_user_id IS NULL OR discord_user_id = '')",
+                    (discord_id, user_id),
+                )
+        # Also stamp auction_number directly on the claim row
+        from Core.db import db_session as _dbs3
+        with _dbs3(active.db_path) as conn3:
+            conn3.execute(
+                "UPDATE claims SET auction_number = ? WHERE item_code = ? AND removed_at IS NULL",
+                (str(auction_id), item_code),
+            )
+
+        # Open trade channel — search by name if no discord_id
+        try:
+            import requests as _req
+            _open_id = discord_id
+            if not _open_id:
+                sr = _req.get("http://127.0.0.1:8001/members/search",
+                              params={"q": discord_name, "limit": 1}, timeout=5)
+                results = sr.json().get("results", [])
+                if results:
+                    _open_id = str(results[0].get("id", ""))
+            if _open_id:
+                _req.post("http://127.0.0.1:8001/trade/open_for_user",
+                          params={"discord_user_id": _open_id}, timeout=10)
+                print(f"[BINSHOW] Trade channel opened for discord_id={_open_id}")
+            else:
+                print(f"[BINSHOW] Could not find discord_id for {discord_name} — trade channel skipped")
+        except Exception as e:
+            print(f"[BINSHOW] Trade channel error: {e}")
+
+        return {"ok": True, "item_code": item_code, "assigned_to": discord_name}
+
+    except ClaimError as e:
+        return {"ok": False, "error": e.message}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@router.post("/ui/binshow/log/clear")
+def ui_binshow_log_clear():
+    from Core.bin_queue import clear_auction_log
+    n = clear_auction_log()
+    return {"ok": True, "cleared": n}
+
+
+@router.get("/ui/binshow/preview")
+def ui_binshow_preview(item_code: str):
+    active = shows.get_active()
+    if not active:
+        return {"url": None}
+    rating = "nsfw" if item_code.startswith("N") else "sfw"
+    media  = get_media(active.db_path, item_code, "watermarked", rating)
+    return {"url": media["attachment_url"] if media else None}
+
+
+@router.get("/ui/binshow/state")
+def ui_binshow_state():
+    """Return current claims so page can restore state on reload."""
+    active = shows.get_active()
+    if not active:
+        return {"rows": {}}
+    from Core.claim_service import list_claims
+    from Core.media_service import get_media as _get_media
+    claims = list_claims(active.db_path, include_removed=False)
+    rows = {}
+    for c in claims:
+        code = c["item_code"]
+        if not code.startswith("N"):
+            continue
+        try:
+            n = int(code[1:])
+        except ValueError:
+            continue
+        rows[str(n)] = {
+            "whatnot_name": c.get("user_display_name", ""),
+            "discord_name": c.get("user_display_name", ""),
+            "status": "done",
+        }
+    return {"rows": rows}
+
+
+@router.post("/ui/binshow/submit")
+async def ui_binshow_submit(
+    auction_number: int = Form(...),
+    whatnot_name:   str = Form(...),
+    discord_name:   str = Form(...),
+    discord_id:     str = Form(""),
+):
+    """
+    Assign auction_number card to discord_name and publish to catalog.
+    Creates user if not found. Works entirely without the bin queue.
+    """
+    active    = require_active_show()
+    item_code = f"N{auction_number:03d}"
+    discord_name = discord_name.strip()
+    whatnot_name = whatnot_name.strip()
+
+    try:
+        from Core.db import db_session
+        from Core.normalize import normalize_name
+        from Core.voucher_service import award_voucher
+        from Core.claim_service import create_claim, ClaimError
+        from Core.show_settings_service import get_setting
+        from datetime import datetime, timezone
+
+        def _now():
+            return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+        # Use discord_name if matched, otherwise fall back to whatnot_name as guest
+        effective_name = discord_name if discord_name else whatnot_name
+
+        # Find or create user — never blocks on missing match
+        with db_session(active.db_path) as conn:
+            norm = normalize_name(effective_name)
+            row  = None
+            if discord_id:
+                row = conn.execute(
+                    "SELECT id FROM users WHERE discord_user_id = ? LIMIT 1",
+                    (str(discord_id),)
+                ).fetchone()
+            if not row:
+                row = conn.execute(
+                    "SELECT id FROM users WHERE normalized_name = ? AND kind IN ('discord','pending','guest') LIMIT 1",
+                    (norm,)
+                ).fetchone()
+            if row:
+                user_id = row["id"]
+            else:
+                # Create pending/guest user with Whatnot name — merges later when they verify
+                cur = conn.execute(
+                    "INSERT INTO users (kind, discord_user_id, display_name, normalized_name, created_at) "
+                    "VALUES ('pending', NULL, ?, ?, datetime('now'))",
+                    (effective_name, norm),
+                )
+                user_id = cur.lastrowid
+
+            # Ensure inventory row
+            existing = conn.execute(
+                "SELECT item_code, status FROM inventory_items WHERE item_code = ?", (item_code,)
+            ).fetchone()
+            if not existing:
+                now = _now()
+                conn.execute(
+                    "INSERT INTO inventory_items (item_code, status, post_mode, created_at, updated_at) "
+                    "VALUES (?, 'available', 'claim', ?, ?)",
+                    (item_code, now, now),
+                )
+            elif existing["status"] not in ("available",):
+                return {"ok": False, "error": f"{item_code} is already {existing['status']}"}
+
+        # Award voucher + claim
+        award_voucher(active.db_path, user_id=user_id, reason="STAFF_ADJUST",
+                      note=f"Bin show auction #{auction_number}")
+
+        # Set auction_number on claim
+        from Core.db import db_session as _dbs
+        create_claim(active.db_path, item_code=item_code, user_id=user_id,
+                     source="bin", auction_number=str(auction_number))
+
+        # Card is already posted by host typing in Discord — just return success
+        return {
+            "ok": True,
+            "item_code": item_code,
+            "assigned_to": discord_name,
+            "published": True,
+        }
+
+    except ClaimError as e:
+        return {"ok": False, "error": e.message}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@router.post("/ui/inventory/assign")
+def ui_inventory_assign(item_code: str = Form(...), display_name: str = Form(...)):
+    """Direct-assign an item to any user by display name. Creates user if needed."""
+    active    = require_active_show()
+    item_code = item_code.strip().upper()
+    display_name = display_name.strip()
+    if not display_name:
+        return {"ok": False, "error": "Display name required"}
+    try:
+        from Core.db import db_session
+        from Core.normalize import normalize_name
+        from Core.voucher_service import award_voucher
+        from Core.claim_service import create_claim, ClaimError
+        from datetime import datetime, timezone
+
+        def _now():
+            return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+        with db_session(active.db_path) as conn:
+            norm = normalize_name(display_name)
+            row  = conn.execute(
+                "SELECT id FROM users WHERE normalized_name = ? AND kind IN ('discord','pending','guest') LIMIT 1",
+                (norm,)
+            ).fetchone()
+            if row:
+                user_id = row["id"]
+            else:
+                cur = conn.execute(
+                    "INSERT INTO users (kind, discord_user_id, display_name, normalized_name, created_at) "
+                    "VALUES ('pending', NULL, ?, ?, datetime('now'))",
+                    (display_name, norm),
+                )
+                user_id = cur.lastrowid
+
+            existing = conn.execute(
+                "SELECT item_code FROM inventory_items WHERE item_code = ?", (item_code,)
+            ).fetchone()
+            if not existing:
+                now = _now()
+                conn.execute(
+                    "INSERT INTO inventory_items (item_code, status, post_mode, created_at, updated_at) "
+                    "VALUES (?, 'available', 'claim', ?, ?)",
+                    (item_code, now, now),
+                )
+
+        award_voucher(active.db_path, user_id=user_id, reason="STAFF_ADJUST", note=f"Direct assign {item_code}")
+        create_claim(active.db_path, item_code=item_code, user_id=user_id, source="staff")
+        return {"ok": True, "item_code": item_code, "assigned_to": display_name}
+
+    except ClaimError as e:
+        return {"ok": False, "error": e.message}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 @router.post("/ui/claims/set_auction")
 def ui_claims_set_auction(item_code: str = Form(...), auction_number: str = Form(...)):
     """Update the auction_number on a claim — for correcting OCR misreads."""
@@ -784,3 +1190,327 @@ async def ui_settings_save(
         if value.strip():
             set_key(str(ENV_PATH), key, value.strip())
     return {"ok": True}
+
+
+# ── Bin Show Manager ──────────────────────────────────────────────────────────
+
+@router.get("/ui/binshow")
+def ui_binshow(request: Request):
+    ctx = _base_ctx("binshow", request)
+    return templates.TemplateResponse("index.html", ctx)
+
+
+@router.get("/ui/binshow/log")
+def ui_binshow_log():
+    from Core.bin_queue import get_auction_log
+    return {"ok": True, "rows": get_auction_log()}
+
+
+@router.delete("/ui/binshow/log/{auction_id}")
+def ui_binshow_log_delete(auction_id: int):
+    from Core.bin_queue import _connect
+    conn = _connect()
+    try:
+        cur = conn.execute("DELETE FROM auction_log WHERE id = ?", (auction_id,))
+        conn.commit()
+        return {"ok": True, "deleted": cur.rowcount > 0}
+    finally:
+        conn.close()
+
+
+@router.post("/ui/binshow/log/clear")
+def ui_binshow_log_clear():
+    from Core.bin_queue import clear_auction_log
+    n = clear_auction_log()
+    return {"ok": True, "cleared": n}
+
+
+@router.get("/ui/binshow/fuzzy")
+def ui_binshow_fuzzy(whatnot_name: str):
+    import re, requests as _req
+    try:
+        r = _req.get("http://127.0.0.1:8001/members", timeout=5)
+        data = r.json()
+        members = data.get("verified", []) + data.get("unverified", [])
+    except Exception as e:
+        return {"ok": False, "match": None, "score": 0, "error": str(e)}
+
+    def _norm(s): return re.sub(r"[^a-z0-9]", "", s.lower())
+    def _sim(a, b):
+        if not a or not b: return 0.0
+        if a == b: return 1.0
+        m, n = len(a), len(b)
+        dp = [[0]*(n+1) for _ in range(m+1)]
+        for i in range(1, m+1):
+            for j in range(1, n+1):
+                dp[i][j] = dp[i-1][j-1]+1 if a[i-1]==b[j-1] else max(dp[i-1][j], dp[i][j-1])
+        return dp[m][n]/max(m,n)
+
+    target = _norm(whatnot_name.strip())
+    if not target:
+        return {"ok": False, "match": None, "score": 0}
+
+    best_name, best_id, best_score = None, None, 0.0
+    for m in members:
+        norm = _norm(m.get("display_name", ""))
+        if norm == target:
+            return {"ok": True, "match": m["display_name"], "discord_id": m["discord_id"], "score": 1.0}
+        score = _sim(target, norm)
+        if len(target) >= 4 and norm.endswith(target): score = max(score, 0.88)
+        parts = norm.split("_") if "_" in norm else []
+        if parts and target in parts: score = max(score, 0.92)
+        if score > best_score:
+            best_score, best_name, best_id = score, m.get("display_name"), m.get("discord_id")
+
+    if best_score >= 0.75:
+        return {"ok": True, "match": best_name, "discord_id": best_id, "score": round(best_score, 2)}
+    return {"ok": False, "match": best_name, "discord_id": best_id, "score": round(best_score, 2)}
+
+
+@router.get("/ui/binshow/preview")
+def ui_binshow_preview(item_code: str):
+    active = shows.get_active()
+    if not active:
+        return {"url": None}
+    rating = "nsfw" if item_code.startswith("N") else "sfw"
+    media  = get_media(active.db_path, item_code, "watermarked", rating)
+    return {"url": media["attachment_url"] if media else None}
+
+
+@router.get("/ui/binshow/state")
+def ui_binshow_state():
+    active = shows.get_active()
+    if not active:
+        return {"rows": {}}
+    claims = list_claims(active.db_path, include_removed=False)
+    rows = {}
+    for c in claims:
+        code = c["item_code"]
+        if not code.startswith("N"):
+            continue
+        try:
+            n = int(code[1:])
+        except ValueError:
+            continue
+        rows[str(n)] = {
+            "whatnot_name": c.get("user_display_name", ""),
+            "discord_name": c.get("user_display_name", ""),
+            "status": "done",
+        }
+    return {"rows": rows}
+
+
+@router.post("/ui/binshow/log/{auction_id}/assign")
+def ui_binshow_log_assign(
+    auction_id: int,
+    whatnot_name: str = Form(...),
+    discord_name: str = Form(...),
+    discord_id:   str = Form(""),
+):
+    active       = require_active_show()
+    whatnot_name = whatnot_name.strip()
+    discord_name = discord_name.strip()
+    discord_id   = discord_id.strip()
+
+    from Core.bin_queue import _connect as _bq_connect, update_auction_winner
+    conn = _bq_connect()
+    try:
+        row = conn.execute("SELECT card_number FROM auction_log WHERE id = ?", (auction_id,)).fetchone()
+    finally:
+        conn.close()
+
+    if not row:
+        return {"ok": False, "error": "Auction entry not found"}
+
+    card_number = row["card_number"]
+    item_code   = f"N{card_number:03d}"
+
+    try:
+        from Core.voucher_service import award_voucher as _award
+        from Core.claim_service import create_claim, ClaimError
+        from datetime import datetime, timezone
+
+        def _now():
+            return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+        with db_session(active.db_path) as conn2:
+            user_row = None
+            # Always prefer discord_id lookup
+            if discord_id:
+                user_row = conn2.execute(
+                    "SELECT id FROM users WHERE discord_user_id = ? LIMIT 1", (discord_id,)
+                ).fetchone()
+            # Fall back to discord-kind name match
+            if not user_row:
+                norm = normalize_name(discord_name)
+                user_row = conn2.execute(
+                    "SELECT id FROM users WHERE normalized_name = ? AND kind = 'discord' LIMIT 1", (norm,)
+                ).fetchone()
+            # Last resort any kind
+            if not user_row:
+                norm = normalize_name(discord_name)
+                user_row = conn2.execute(
+                    "SELECT id FROM users WHERE normalized_name = ? LIMIT 1", (norm,)
+                ).fetchone()
+
+            if user_row:
+                user_id = user_row["id"]
+            else:
+                norm = normalize_name(discord_name)
+                cur2 = conn2.execute(
+                    "INSERT INTO users (kind, discord_user_id, display_name, normalized_name, created_at) "
+                    "VALUES ('pending', ?, ?, ?, datetime('now'))",
+                    (discord_id or None, discord_name, norm),
+                )
+                user_id = cur2.lastrowid
+
+            existing = conn2.execute(
+                "SELECT status FROM inventory_items WHERE item_code = ?", (item_code,)
+            ).fetchone()
+            if not existing:
+                now = _now()
+                conn2.execute(
+                    "INSERT INTO inventory_items (item_code, status, post_mode, created_at, updated_at) "
+                    "VALUES (?, 'available', 'claim', ?, ?)",
+                    (item_code, now, now),
+                )
+            elif existing["status"] not in ("available",):
+                return {"ok": False, "error": f"{item_code} is already {existing['status']}"}
+
+        _award(active.db_path, user_id=user_id, reason="STAFF_ADJUST",
+               note=f"Bin auction #{auction_id} card {item_code}")
+        create_claim(active.db_path, item_code=item_code, user_id=user_id,
+                     source="bin", auction_number=str(auction_id))
+
+        # Stamp auction_number on claim
+        with db_session(active.db_path) as conn3:
+            conn3.execute(
+                "UPDATE claims SET auction_number = ? WHERE item_code = ? AND removed_at IS NULL",
+                (str(auction_id), item_code),
+            )
+
+        update_auction_winner(auction_id, whatnot_name, discord_name)
+
+        # Open trade channel
+        try:
+            import requests as _req
+            _open_id = discord_id
+            if not _open_id:
+                sr = _req.get("http://127.0.0.1:8001/members/search",
+                              params={"q": discord_name, "limit": 1}, timeout=5)
+                results = sr.json().get("results", [])
+                if results:
+                    _open_id = str(results[0].get("discord_id", ""))
+            if _open_id:
+                _req.post("http://127.0.0.1:8001/trade/open_for_user",
+                          params={"discord_user_id": _open_id}, timeout=10)
+                print(f"[BINSHOW] Trade channel opened for discord_id={_open_id}")
+            else:
+                print(f"[BINSHOW] Could not find discord_id for {discord_name}")
+        except Exception as e:
+            print(f"[BINSHOW] Trade channel error: {e}")
+
+        return {"ok": True, "item_code": item_code, "assigned_to": discord_name}
+
+    except ClaimError as e:
+        return {"ok": False, "error": e.message}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@router.post("/ui/inventory/assign")
+def ui_inventory_assign(item_code: str = Form(...), display_name: str = Form(...)):
+    active    = require_active_show()
+    item_code = item_code.strip().upper()
+    display_name = display_name.strip()
+    if not display_name:
+        return {"ok": False, "error": "Display name required"}
+    try:
+        from Core.voucher_service import award_voucher as _award
+        from Core.claim_service import create_claim, ClaimError
+        from datetime import datetime, timezone
+
+        def _now():
+            return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+        with db_session(active.db_path) as conn:
+            norm = normalize_name(display_name)
+            row  = conn.execute(
+                "SELECT id FROM users WHERE normalized_name = ? AND kind IN ('discord','pending','guest') LIMIT 1",
+                (norm,)
+            ).fetchone()
+            if row:
+                user_id = row["id"]
+            else:
+                cur = conn.execute(
+                    "INSERT INTO users (kind, discord_user_id, display_name, normalized_name, created_at) "
+                    "VALUES ('pending', NULL, ?, ?, datetime('now'))",
+                    (display_name, norm),
+                )
+                user_id = cur.lastrowid
+
+            existing = conn.execute(
+                "SELECT item_code FROM inventory_items WHERE item_code = ?", (item_code,)
+            ).fetchone()
+            if not existing:
+                now = _now()
+                conn.execute(
+                    "INSERT INTO inventory_items (item_code, status, post_mode, created_at, updated_at) "
+                    "VALUES (?, 'available', 'claim', ?, ?)",
+                    (item_code, now, now),
+                )
+
+        _award(active.db_path, user_id=user_id, reason="STAFF_ADJUST", note=f"Direct assign {item_code}")
+        create_claim(active.db_path, item_code=item_code, user_id=user_id, source="staff")
+        return {"ok": True, "item_code": item_code, "assigned_to": display_name}
+
+    except ClaimError as e:
+        return {"ok": False, "error": e.message}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@router.post("/ui/claims/set_auction")
+def ui_claims_set_auction(item_code: str = Form(...), auction_number: str = Form(...)):
+    active = require_active_show()
+    item_code = item_code.strip().upper()
+    num = auction_number.strip() or None
+    try:
+        with db_session(active.db_path) as conn:
+            cur = conn.execute(
+                "UPDATE claims SET auction_number = ? WHERE item_code = ? AND removed_at IS NULL",
+                (num, item_code),
+            )
+            if cur.rowcount == 0:
+                return {"ok": False, "error": f"No active claim found for {item_code}"}
+        return {"ok": True, "item_code": item_code, "auction_number": num}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@router.post("/trade/refresh_all")
+def trade_refresh_all_proxy():
+    try:
+        r = requests.post("http://127.0.0.1:8001/trade/refresh_all", timeout=120)
+        return r.json()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@router.get("/ui/show/reset_claims")
+@router.post("/ui/show/reset_claims")
+def ui_show_reset_claims():
+    """Wipe all claims, users, vouchers. Keep inventory and media intact."""
+    active = require_active_show()
+    try:
+        with db_session(active.db_path) as conn:
+            conn.execute("DELETE FROM claims")
+            conn.execute("DELETE FROM voucher_ledger")
+            conn.execute("DELETE FROM users")
+            conn.execute("UPDATE inventory_items SET status = 'available'")
+        # Clear auction log
+        from Core.bin_queue import clear_auction_log
+        clear_auction_log()
+        return {"ok": True, "message": "Claims, users, vouchers wiped. Inventory reset to available."}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}

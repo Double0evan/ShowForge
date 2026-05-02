@@ -1,10 +1,11 @@
-[15:13:33] [INFO] === Watcher starting ===
-[15:13:33] [INFO] Watching SFW:    F:\GrandLineBreaks12\INBOX\SFW
-[15:13:34] [INFO] Watching NSFW:   F:\GrandLineBreaks12\INBOX\NSFW
-[15:13:34] [INFO] Backend:         http://127.0.0.1:8000
-[15:13:34] [INFO] Post mode:       hold
-[15:13:34] [INFO] Active show:     2026-04-24_test_23
-[15:13:34] [INFO] State DB:        F:\GrandLineBreaks12\_watcher_state\2026-04-24_test_23.sqlite
-[15:13:34] [INFO] Observer started — ready for files
-[15:13:34] [INFO] Worker loop started — watching for files
-[15:13:36] [INFO] Watcher logged in as: V3_bot#4232
+[04:14:08] [INFO] === Watcher starting ===
+[04:14:08] [INFO] Watching SFW:    F:\GrandLineBreaks12\INBOX\SFW
+[04:14:08] [INFO] Watching NSFW:   F:\GrandLineBreaks12\INBOX\NSFW
+[04:14:08] [INFO] Backend:         http://127.0.0.1:8000
+[04:14:08] [INFO] Post mode:       hold
+[04:14:08] [INFO] Active show:     2026-04-30_April_30th_-_new_system
+[04:14:08] [INFO] State DB:        F:\GrandLineBreaks12\_watcher_state\2026-04-30_April_30th_-_new_system.sqlite
+[04:14:08] [INFO] Observer started — ready for files
+[04:14:08] [INFO] Worker loop started — watching for files
+[04:14:08] [INFO] Processing ENABLED via UI — scanning inbox...
+[04:14:10] [INFO] Watcher logged in as: V3_bot#4232

@@ -61,6 +61,11 @@ def get_unverified() -> list[dict]:
     return [asdict(m) for m in sorted(_members.values(), key=lambda m: m.display_name.lower()) if m.status == "unverified"]
 
 
+def all_members() -> list[dict]:
+    with _lock:
+        return [{'id': e.discord_id, 'display_name': e.display_name} for e in _cache.values()]
+
+
 def search(query: str, limit: int = 10) -> list[dict]:
     q = query.lower().strip()
     if not q:

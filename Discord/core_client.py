@@ -17,14 +17,16 @@ class CoreClient:
 
     # ── Users ─────────────────────────────────────────────────────────────────
 
-    def upsert_discord_user(self, discord_user_id: int, display_name: str) -> int:
+    def upsert_discord_user(self, discord_user_id: int, display_name: str) -> tuple[int, bool]:
+        """Returns (internal_user_id, was_merged)."""
         r = requests.post(
             f"{self.base_url}/users/upsert_discord",
             params={"discord_user_id": str(discord_user_id), "display_name": display_name},
             timeout=10,
         )
         r.raise_for_status()
-        return int(r.json()["user_id"])
+        data = r.json()
+        return int(data["user_id"]), bool(data.get("merged_from"))
 
     def upsert_guest_user(self, display_name: str, kind: str = "guest", note: str = "") -> int:
         """Creates a pending/guest user in the active show DB."""
