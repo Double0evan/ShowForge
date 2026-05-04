@@ -40,7 +40,7 @@ def build_card_detail_embed(*, row:Any, owner_display:str)->discord.Embed:
     embed=discord.Embed(title=f"Card  `{row['item_code']}`", color=status_color)
     embed.add_field(name="Status", value=(row.get("status") or "unknown").capitalize(), inline=True)
     embed.add_field(name="Owner", value=owner_display, inline=True)
-    if row.get("image_url"): embed.set_image(url=row["image_url"])
+    if row.get("image_url"): embed.set_thumbnail(url=row["image_url"])
     embed.set_footer(text="Use Make Offer below to send a trade offer to the owner")
     return embed
 
@@ -60,18 +60,25 @@ def build_public_listing_embed(*, listing_id:str, item_codes:list[str], owner_di
 def build_offer_received_embed(*, offer_id:str, sender_display:str, item_codes:list[str], requested_codes:Optional[list[str]]=None, preview_code:Optional[str]=None, preview_url:Optional[str]=None, requested_preview_url:Optional[str]=None, index:int=0, total:int=1)->discord.Embed:
     embed=discord.Embed(title="📨  Incoming Trade Offer", color=0xFAA61A)
     embed.add_field(name="From", value=sender_display, inline=False)
-    # Offered cards
-    offering_val="\n".join(f"• `{code}`" for code in item_codes) or "_No cards listed._"
-    if total > 1:
-        offering_val += f"\n\n*Showing {index+1} of {total} — use ◀ ▶ to browse*"
-    embed.add_field(name=f"🃏  They're Offering ({total} card{'s' if total != 1 else ''})", value=offering_val, inline=False)
+    embed.add_field(name="They're Offering", value="\n".join(f"• `{code}`" for code in item_codes) or "_No cards listed._", inline=False)
     if requested_codes:
-        embed.add_field(name="🎯  They Want", value="\n".join(f"• `{code}`" for code in requested_codes), inline=False)
-    # Main image = current offered card preview
-    if preview_url:
-        embed.set_image(url=preview_url)
-    # Thumbnail = the card they're requesting (so receiver sees both)
-    if requested_preview_url:
-        embed.set_thumbnail(url=requested_preview_url)
-    embed.set_footer(text=f"Offer {offer_id}  ·  Use ◀ ▶ to browse offered cards, then Accept or Decline")
+        embed.add_field(name="They Want", value="\n".join(f"• `{code}`" for code in requested_codes), inline=False)
+    if preview_code: embed.add_field(name="Preview", value=f"`{preview_code}`  ({index+1}/{total})", inline=False)
+    if preview_url: embed.set_image(url=preview_url)
+    if requested_preview_url: embed.set_thumbnail(url=requested_preview_url)
+    embed.set_footer(text=f"Offer {offer_id}  ·  Browse cards or Accept/Decline")
+    return embed
+
+
+def build_offer_notification_embed(*, offer_id: str, sender_display: str, item_codes: list, requested_codes: list | None = None) -> discord.Embed:
+    """Small notification embed - just enough info to know what arrived."""
+    embed = discord.Embed(
+        title="📨 New Trade Offer",
+        description=f"From {sender_display}",
+        color=0x5865F2,
+    )
+    embed.add_field(name="Offering", value=" ".join(f'`{c}`' for c in item_codes), inline=True)
+    if requested_codes:
+        embed.add_field(name="Wants", value=" ".join(f'`{c}`' for c in requested_codes), inline=True)
+    embed.set_footer(text=f"Offer {offer_id} · Press View to see details and respond")
     return embed

@@ -8,11 +8,11 @@ from Core.db import db_session
 from Trade.db.trade_db import (
     get_trade_channel_id, save_trade_channel_id, get_trade_ui_message_id, save_trade_ui_message_id, delete_trade_ui_message_id,
     get_user_card_count, get_user_cards_page, get_user_active_listing_count, get_user_incoming_offer_count,
-    save_listing, save_offer, resolve_offer, swap_card_ownership_for_offer, search_card_by_item_code,
+    save_listing, save_offer, resolve_offer, swap_card_ownership_for_offer, decline_conflicting_pending_offers, search_card_by_item_code,
     get_offer_row, save_listing_public_message, get_listing_public_message, delete_listing_public_message
 )
-from Trade.ui.trade_embeds import build_home_embed, build_listings_embed, build_public_listing_embed, build_offer_received_embed
-from Trade.ui.trade_views import TradeHomeView, TradeListingsView, TradeOfferResponseView
+from Trade.ui.trade_embeds import build_home_embed, build_listings_embed, build_public_listing_embed, build_offer_received_embed, build_offer_notification_embed
+from Trade.ui.trade_views import TradeHomeView, TradeListingsView, TradeOfferResponseView, TradeOfferNotificationView
 log=logging.getLogger(__name__)
 BINDER_PAGE_SIZE=1
 MSG_HOME="home"; MSG_LISTINGS="listings"
@@ -138,8 +138,20 @@ async def handle_send_offer(db_path:Path,interaction:discord.Interaction,sender_
                 if target_item_code:
                     req_row=search_card_by_item_code(conn,target_item_code)
                     requested_preview_url=req_row["image_url"] if req_row else None
-            embed=build_offer_received_embed(offer_id=offer_id,sender_display=sender_display,item_codes=item_codes,requested_codes=[target_item_code] if target_item_code else None,preview_code=item_codes[0] if item_codes else None,preview_url=preview_urls[0] if preview_urls else None,requested_preview_url=requested_preview_url,index=0,total=len(item_codes) if item_codes else 1)
-            await receiver_ch.send(embed=embed,view=TradeOfferResponseView(db_path,offer_id,receiver_user_id,item_codes=item_codes,preview_urls=preview_urls,page=0,sender_display=sender_display))
+            notif_embed = build_offer_notification_embed(
+                offer_id=offer_id,
+                sender_display=sender_display,
+                item_codes=item_codes,
+                requested_codes=[target_item_code] if target_item_code else None,
+            )
+            await receiver_ch.send(
+                embed=notif_embed,
+                view=TradeOfferNotificationView(
+                    db_path, offer_id, receiver_user_id,
+                    item_codes=item_codes, preview_urls=preview_urls,
+                    sender_display=sender_display,
+                ),
+            )
     await interaction.followup.send(f"Offer `{offer_id}` sent!",ephemeral=True)
 
 async def _log_trade(db_path, guild, offer_id, sender_user_id, receiver_user_id, offer_codes, requested_codes):
@@ -182,7 +194,18 @@ async def _log_trade(db_path, guild, offer_id, sender_user_id, receiver_user_id,
 
 async def handle_offer_accepted(db_path:Path,interaction:discord.Interaction,offer_id:str)->None:
     with db_session(db_path) as conn:
-        offer=get_offer_row(conn,offer_id); resolve_offer(conn,offer_id,"accepted"); swap_card_ownership_for_offer(conn,offer_id)
+        offer=get_offer_row(conn,offer_id)
+        if not offer:
+            await interaction.followup.send(f"Offer `{offer_id}` was not found.",ephemeral=True)
+            return
+        moved=swap_card_ownership_for_offer(conn,offer_id)
+        resolve_offer(conn,offer_id,"accepted")
+        declined_ids=decline_conflicting_pending_offers(conn,offer_id,moved["moved_to_receiver"]+moved["moved_to_sender"])
+        # Get sender info for each declined offer so we can notify them
+        declined_senders=[]
+        for did in declined_ids:
+            drow=get_offer_row(conn,did)
+            if drow: declined_senders.append((did,int(drow["sender_user_id"])))
         public_ref=None
         if offer and offer["listing_id"]:
             public_ref=get_listing_public_message(conn,offer["listing_id"]); delete_listing_public_message(conn,offer["listing_id"])
@@ -192,8 +215,8 @@ async def handle_offer_accepted(db_path:Path,interaction:discord.Interaction,off
             msg=await ch.fetch_message(int(public_ref["message_id"])); await msg.delete()
         except discord.NotFound: pass
         except Exception as e: log.warning("Could not delete public listing post for offer %s: %s",offer_id,e)
-    await interaction.message.edit(content=f"✅ Offer `{offer_id}` accepted.",view=None)
-    await interaction.followup.send("Trade accepted! Ownership updated.",ephemeral=True)
+    await interaction.channel.send(f"✅ Trade accepted — {offer_id} complete.")
+    await interaction.followup.send("Trade accepted! Ownership updated.", ephemeral=True)
     if not interaction.guild or not offer: return
 
     # Refresh both users' trade channels
@@ -202,6 +225,21 @@ async def handle_offer_accepted(db_path:Path,interaction:discord.Interaction,off
             with db_session(db_path) as conn: channel_id=get_trade_channel_id(conn,interaction.guild.id,uid)
             if channel_id and (ch:=interaction.guild.get_channel(channel_id)): await refresh_all_trade_messages(db_path,ch,uid)
         except Exception as e: log.warning("Could not refresh trade channel for user %s after trade: %s",uid,e)
+
+    # Notify senders of conflicting offers that were auto-declined
+    if interaction.guild:
+        for declined_offer_id, sender_uid in declined_senders:
+            try:
+                with db_session(db_path) as conn:
+                    sender_ch_id = get_trade_channel_id(conn, interaction.guild.id, sender_uid)
+                if sender_ch_id:
+                    sender_ch = interaction.guild.get_channel(sender_ch_id)
+                    if sender_ch:
+                        await sender_ch.send(
+                            f"❌ Your offer  was automatically declined — the requested card was traded to someone else.",
+                        )
+            except Exception as e:
+                log.warning("Could not notify sender %s of auto-decline: %s", sender_uid, e)
 
     # Log the trade to the show trade log thread
     from Trade.db.trade_db import get_offer_item_codes, get_offer_requested_codes
@@ -215,6 +253,30 @@ async def handle_offer_accepted(db_path:Path,interaction:discord.Interaction,off
     )
 
 async def handle_offer_declined(db_path:Path,interaction:discord.Interaction,offer_id:str)->None:
-    with db_session(db_path) as conn: resolve_offer(conn,offer_id,"declined")
-    await interaction.message.edit(content=f"❌ Offer `{offer_id}` declined.",view=None)
-    await interaction.followup.send("Offer declined.",ephemeral=True)
+    with db_session(db_path) as conn:
+        offer = get_offer_row(conn, offer_id)
+        resolve_offer(conn,offer_id,"declined")
+    await interaction.followup.send("Offer declined.", ephemeral=True)
+    # Refresh receiver channel so counts update + notify sender
+    if offer and interaction.guild:
+        receiver_id = int(offer["receiver_user_id"])
+        sender_id   = int(offer["sender_user_id"])
+        try:
+            with db_session(db_path) as conn:
+                channel_id = get_trade_channel_id(conn, interaction.guild.id, receiver_id)
+            if channel_id and (ch := interaction.guild.get_channel(channel_id)):
+                await refresh_all_trade_messages(db_path, ch, receiver_id)
+        except Exception as e:
+            log.warning("Could not refresh trade channel after decline: %s", e)
+        # Notify sender in their trade channel
+        try:
+            with db_session(db_path) as conn:
+                sender_ch_id = get_trade_channel_id(conn, interaction.guild.id, sender_id)
+            if sender_ch_id:
+                sender_ch = interaction.guild.get_channel(sender_ch_id)
+                if sender_ch:
+                    receiver_member = interaction.guild.get_member(receiver_id)
+                    receiver_name   = receiver_member.display_name if receiver_member else f"<@{receiver_id}>"
+                    await sender_ch.send(f"❌ Your offer `{offer_id}` to **{receiver_name}** was declined.")
+        except Exception as e:
+            log.warning("Could not notify sender of decline: %s", e)

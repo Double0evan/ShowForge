@@ -22,8 +22,7 @@ CLAIM_BOT_COMMANDS_CHANNEL_ID = int(os.getenv("CLAIM_BOT_COMMANDS_CHANNEL_ID", "
 
 def register_bin_listener(client: discord.Client, core, bot_api_url: str = "http://127.0.0.1:8001"):
 
-    @client.event
-    async def on_message(message: discord.Message):
+    async def handle_bin_message(message: discord.Message):
         if message.author.bot:
             return
         if not message.guild:
@@ -88,3 +87,5 @@ def register_bin_listener(client: discord.Client, core, bot_api_url: str = "http
             await message.reply(f"✅ **{item_code}** posted", mention_author=False)
         else:
             await message.reply(f"⚠️ `{item_code}`: {pub.get('error', 'publish failed')}", mention_author=False)
+
+    client._bin_message_handler = handle_bin_message

@@ -164,8 +164,15 @@ def pick_file(accept: str = ""):
 # ── SHOW CONTROL ──────────────────────────────────────────────────────────────
 
 @router.post("/ui/show/new")
-async def ui_new_show(date: str = Form(...), name: str = Form(...)):
+def ui_new_show(date: str = Form(...), name: str = Form(...)):
     ref = shows.create_new_show(date, name)
+
+    # Clear auction log from previous show
+    try:
+        from Core.bin_queue import clear_auction_log
+        clear_auction_log()
+    except Exception as e:
+        print(f"[NEW_SHOW] Could not clear auction log: {e}")
 
     # Ask the bot to create the Discord archival claim threads
     discord_result = {}
@@ -449,15 +456,16 @@ def ui_binshow_log():
 
 @router.delete("/ui/binshow/log/{auction_id}")
 def ui_binshow_log_delete(auction_id: int):
-    """Remove a row from the auction log (wrong number typed)."""
-    from Core.bin_queue import _connect
-    conn = _connect()
-    try:
-        cur = conn.execute("DELETE FROM auction_log WHERE id = ?", (auction_id,))
-        conn.commit()
-        return {"ok": True, "deleted": cur.rowcount > 0}
-    finally:
-        conn.close()
+    """Remove a row from the auction log and restamp claim auction numbers."""
+    from Core.bin_queue import delete_auction_log_entry, restamp_auction_claim_numbers
+    deleted = delete_auction_log_entry(auction_id)
+    if deleted:
+        try:
+            active = require_active_show()
+            restamp_auction_claim_numbers(active.db_path)
+        except Exception:
+            pass
+    return {"ok": True, "deleted": deleted}
 
 
 @router.post("/ui/binshow/log/{auction_id}/assign")

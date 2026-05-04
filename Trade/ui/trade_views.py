@@ -8,7 +8,7 @@ from Core.db import db_session
 from Trade.ui.trade_embeds import build_card_detail_embed, build_public_listing_embed
 from Trade.db.trade_db import (
     search_card_by_item_code, get_user_card_count, get_user_cards_page,
-    get_user_cards_all,
+    get_user_cards_all, get_offer_row, get_offer_item_codes, get_offer_requested_codes,
 )
 
 PAGE_SIZE = 25  # Discord select menu max options
@@ -72,9 +72,9 @@ class CardPickerSelect(discord.ui.Select):
 
 class CardPickerView(discord.ui.View):
     """
-    Shows a paginated select of `owner_user_id`'s cards.
-    On confirm, calls `on_confirm(interaction, selected_codes)`.
-    Used for both listing and offer flows.
+    Image-gallery style card picker.
+    Shows one card per page with its image. User clicks Select to add/remove
+    from their selection, then Confirm when done.
     """
     def __init__(
         self,
@@ -84,10 +84,10 @@ class CardPickerView(discord.ui.View):
         page: int,
         max_values: int,
         title: str,
-        on_confirm,           # async callable(interaction, codes)
+        on_confirm,
         selected: list[str] | None = None,
     ):
-        super().__init__(timeout=120)
+        super().__init__(timeout=180)
         self.all_rows      = all_rows
         self.owner_user_id = owner_user_id
         self.actor_user_id = actor_user_id
@@ -97,14 +97,48 @@ class CardPickerView(discord.ui.View):
         self.on_confirm    = on_confirm
         self._selected     = list(selected or [])
 
-        total_pages = max(1, math.ceil(len(all_rows) / PAGE_SIZE))
-        page_rows   = all_rows[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]
+        total = len(all_rows)
+        self.prev_btn.disabled    = page == 0
+        self.next_btn.disabled    = page >= total - 1
+        self.confirm_btn.disabled = len(self._selected) == 0
 
-        self._select = CardPickerSelect(page_rows, self._selected, f"Select card(s) — page {page+1}/{total_pages}", max_values)
-        self.add_item(self._select)
+        # Update Select/Deselect button label
+        if total > 0:
+            current_code = all_rows[page]["item_code"] if isinstance(all_rows[page], dict) else all_rows[page][0]
+            if current_code in self._selected:
+                self.select_btn.label = "✓ Deselect"
+                self.select_btn.style = discord.ButtonStyle.secondary
+            else:
+                self.select_btn.label = "＋ Select"
+                self.select_btn.style = discord.ButtonStyle.primary
+        else:
+            self.select_btn.disabled = True
 
-        self.prev_btn.disabled = page == 0
-        self.next_btn.disabled = (page + 1) * PAGE_SIZE >= len(all_rows)
+    def _current_code(self) -> str | None:
+        if not self.all_rows or self.page >= len(self.all_rows):
+            return None
+        r = self.all_rows[self.page]
+        return r["item_code"] if isinstance(r, dict) else r[0]
+
+    def _build_embed(self) -> discord.Embed:
+        total = len(self.all_rows)
+        code  = self._current_code()
+        embed = discord.Embed(title=self.title, color=0x5865F2)
+        embed.set_footer(text=f"Card {self.page + 1} of {total}")
+
+        if self._selected:
+            embed.description = f"**Selected ({len(self._selected)}/{self.max_values}):** {', '.join(self._selected)}"
+        else:
+            embed.description = "No cards selected yet. Click **＋ Select** to add a card."
+
+        if code:
+            embed.add_field(name="Card", value=f"", inline=True)
+            r = self.all_rows[self.page]
+            image_url = r.get("image_url") if isinstance(r, dict) else (r[2] if len(r) > 2 else None)
+            if image_url:
+                embed.set_image(url=image_url)
+
+        return embed
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.actor_user_id:
@@ -112,34 +146,49 @@ class CardPickerView(discord.ui.View):
             return False
         return True
 
-    def _rebuild(self, new_page: int) -> "CardPickerView":
-        # Merge any newly selected values into running selection
-        merged = list(set(self._selected + list(self._select.values)))
+    def _rebuild(self, new_page: int, selected: list[str]) -> "CardPickerView":
         return CardPickerView(
             self.all_rows, self.owner_user_id, self.actor_user_id,
-            new_page, self.max_values, self.title, self.on_confirm, merged,
+            new_page, self.max_values, self.title, self.on_confirm, selected,
         )
 
     @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary, row=1)
     async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(view=self._rebuild(self.page - 1))
+        new_view = self._rebuild(self.page - 1, self._selected)
+        await interaction.response.edit_message(embed=new_view._build_embed(), view=new_view)
+
+    @discord.ui.button(label="＋ Select", style=discord.ButtonStyle.primary, row=1)
+    async def select_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        code = self._current_code()
+        if not code:
+            await interaction.response.send_message("No card here.", ephemeral=True)
+            return
+        new_selected = list(self._selected)
+        if code in new_selected:
+            new_selected.remove(code)
+        elif len(new_selected) < self.max_values:
+            new_selected.append(code)
+        else:
+            await interaction.response.send_message(
+                f"You can only select up to {self.max_values} card(s).", ephemeral=True
+            )
+            return
+        new_view = self._rebuild(self.page, new_selected)
+        await interaction.response.edit_message(embed=new_view._build_embed(), view=new_view)
 
     @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary, row=1)
     async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(view=self._rebuild(self.page + 1))
+        new_view = self._rebuild(self.page + 1, self._selected)
+        await interaction.response.edit_message(embed=new_view._build_embed(), view=new_view)
 
-    @discord.ui.button(label="✅ Confirm", style=discord.ButtonStyle.success, row=1)
+    @discord.ui.button(label="✅ Confirm", style=discord.ButtonStyle.success, row=2)
     async def confirm_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        merged = list(set(self._selected + list(self._select.values)))
-        if not merged:
+        if not self._selected:
             await interaction.response.send_message("Select at least one card first.", ephemeral=True)
             return
-        if len(merged) > self.max_values:
-            await interaction.response.send_message(f"Select at most {self.max_values} card(s).", ephemeral=True)
-            return
-        await self.on_confirm(interaction, merged)
+        await self.on_confirm(interaction, self._selected)
 
-    @discord.ui.button(label="✕ Cancel", style=discord.ButtonStyle.danger, row=1)
+    @discord.ui.button(label="✕ Cancel", style=discord.ButtonStyle.danger, row=2)
     async def cancel_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(content="Cancelled.", embed=None, view=None)
 
@@ -165,9 +214,8 @@ async def _show_card_picker(
             await interaction.response.send_message(msg, ephemeral=True)
         return
 
-    embed = discord.Embed(title=title, color=0x5865F2)
-    embed.description = f"{'Up to ' + str(max_values) + ' cards' if max_values > 1 else '1 card'} — use ◀ ▶ to page if needed, then ✅ Confirm."
     view = CardPickerView(rows, owner_user_id, actor_user_id, 0, max_values, title, on_confirm)
+    embed = view._build_embed()
 
     if edit_existing:
         await interaction.response.edit_message(embed=embed, view=view, content=None)
@@ -301,20 +349,116 @@ class TradeListingsView(OwnerOnlyMixin, discord.ui.View):
 
 # ── Offer Response ────────────────────────────────────────────────────────────
 
-class TradeOfferResponseView(discord.ui.View):
-    def __init__(self, db_path: Path, offer_id: str, receiver_user_id: int, item_codes: Optional[list[str]] = None, preview_urls: Optional[list[Optional[str]]] = None, page: int = 0, sender_display: str = "Unknown"):
+class TradeOfferNotificationView(discord.ui.View):
+    """
+    Small notification posted in receiver channel when an offer arrives.
+    Shows minimal info. View button expands the full offer details.
+    """
+    def __init__(self, db_path, offer_id: str, receiver_user_id: int,
+                 item_codes: list, preview_urls: list, sender_display: str):
         super().__init__(timeout=None)
+        self.db_path          = db_path
         self.offer_id         = offer_id
         self.receiver_user_id = receiver_user_id
-        self.item_codes       = item_codes or []
-        self.preview_urls     = preview_urls or []
-        self.page             = page
+        self.item_codes       = item_codes
+        self.preview_urls     = preview_urls
         self.sender_display   = sender_display
+        self.notification_message = None  # set after send
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.receiver_user_id:
+            await interaction.response.send_message("This offer is not for you.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="👁 View Offer", style=discord.ButtonStyle.primary, custom_id="offer_view")
+    async def view_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        from Trade.ui.trade_embeds import build_offer_received_embed
+        db_path = _get_db_path()
+        with db_session(db_path) as conn:
+            from Trade.db.trade_db import get_offer_row, get_offer_item_codes, get_offer_requested_codes, search_card_by_item_code
+            offer = get_offer_row(conn, self.offer_id)
+            if not offer or offer["status"] != "pending":
+                await interaction.response.send_message("This offer is no longer active.", ephemeral=True)
+                return
+            item_codes      = get_offer_item_codes(conn, self.offer_id)
+            requested_codes = get_offer_requested_codes(conn, self.offer_id)
+            preview_urls = []
+            for code in item_codes:
+                row = search_card_by_item_code(conn, code)
+                preview_urls.append(row["image_url"] if row else None)
+            requested_preview_url = None
+            if requested_codes:
+                req = search_card_by_item_code(conn, requested_codes[0])
+                requested_preview_url = req["image_url"] if req else None
+
+        embed = build_offer_received_embed(
+            offer_id=self.offer_id,
+            sender_display=self.sender_display,
+            item_codes=item_codes,
+            requested_codes=requested_codes or None,
+            preview_code=item_codes[0] if item_codes else None,
+            preview_url=preview_urls[0] if preview_urls else None,
+            requested_preview_url=requested_preview_url,
+            index=0,
+            total=len(item_codes),
+        )
+        view = TradeOfferResponseView(
+            db_path, self.offer_id, self.receiver_user_id,
+            item_codes=item_codes, preview_urls=preview_urls,
+            page=0, sender_display=self.sender_display,
+            notification_message=interaction.message,
+        )
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
+class TradeOfferResponseView(discord.ui.View):
+    def __init__(self, db_path: Path, offer_id: str, receiver_user_id: int, item_codes: Optional[list[str]] = None, preview_urls: Optional[list[Optional[str]]] = None, page: int = 0, sender_display: str = "Unknown", notification_message=None):
+        super().__init__(timeout=None)
+        self.offer_id             = offer_id
+        self.receiver_user_id     = receiver_user_id
+        self.item_codes           = item_codes or []
+        self.preview_urls         = preview_urls or []
+        self.page                 = page
+        self.sender_display       = sender_display
+        self.notification_message = notification_message
+        self.prev.custom_id    = f"trade_offer_prev:{offer_id}"
+        self.next.custom_id    = f"trade_offer_next:{offer_id}"
+        self.accept.custom_id  = f"trade_offer_accept:{offer_id}"
+        self.decline.custom_id = f"trade_offer_decline:{offer_id}"
         has_pages             = len(self.item_codes) > 1
         self.prev.disabled    = not has_pages or page == 0
         self.next.disabled    = not has_pages or page >= len(self.item_codes) - 1
 
+    async def _hydrate(self, interaction: discord.Interaction) -> bool:
+        if self.item_codes:
+            return True
+        db = _get_db_path()
+        with db_session(db) as conn:
+            offer = get_offer_row(conn, self.offer_id)
+            if not offer:
+                return False
+            self.receiver_user_id = int(offer["receiver_user_id"])
+            self.item_codes = get_offer_item_codes(conn, self.offer_id)
+            self.requested_codes = get_offer_requested_codes(conn, self.offer_id)
+            self.preview_urls = []
+            for code in self.item_codes:
+                row = search_card_by_item_code(conn, code)
+                self.preview_urls.append(dict(row).get("image_url") if row else None)
+        if interaction.guild:
+            member = interaction.guild.get_member(int(offer["sender_user_id"]))
+            self.sender_display = member.mention if member else f"<@{offer['sender_user_id']}>"
+        else:
+            self.sender_display = f"<@{offer['sender_user_id']}>"
+        has_pages = len(self.item_codes) > 1
+        self.prev.disabled = not has_pages or self.page == 0
+        self.next.disabled = not has_pages or self.page >= len(self.item_codes) - 1
+        return True
+
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if not await self._hydrate(interaction):
+            await interaction.response.send_message("This offer no longer exists.", ephemeral=True)
+            return False
         if interaction.user.id != self.receiver_user_id:
             await interaction.response.send_message("This offer is not addressed to you.", ephemeral=True)
             return False
@@ -322,9 +466,12 @@ class TradeOfferResponseView(discord.ui.View):
 
     async def _update_page(self, interaction: discord.Interaction, new_page: int):
         from Trade.ui.trade_embeds import build_offer_received_embed
+        if not await self._hydrate(interaction):
+            await interaction.response.send_message("This offer no longer exists.", ephemeral=True)
+            return
         code  = self.item_codes[new_page] if self.item_codes else None
         image = self.preview_urls[new_page] if self.preview_urls and new_page < len(self.preview_urls) else None
-        embed = build_offer_received_embed(offer_id=self.offer_id, sender_display=self.sender_display, item_codes=self.item_codes, preview_code=code, preview_url=image, index=new_page, total=len(self.item_codes) or 1)
+        embed = build_offer_received_embed(offer_id=self.offer_id, sender_display=self.sender_display, item_codes=self.item_codes, requested_codes=getattr(self,"requested_codes",None) or None, preview_code=code, preview_url=image, index=new_page, total=len(self.item_codes) or 1)
         await interaction.response.edit_message(embed=embed, view=TradeOfferResponseView(None, self.offer_id, self.receiver_user_id, self.item_codes, self.preview_urls, page=new_page, sender_display=self.sender_display))
 
     @discord.ui.button(label="◀ Prev", style=discord.ButtonStyle.secondary, row=0, custom_id="trade_offer_prev")
@@ -337,12 +484,20 @@ class TradeOfferResponseView(discord.ui.View):
     async def accept(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         from Trade.services.trade_service import handle_offer_accepted
         await interaction.response.defer(ephemeral=True)
+        # Delete the notification message from channel
+        if self.notification_message:
+            try: await self.notification_message.delete()
+            except Exception: pass
         await handle_offer_accepted(_get_db_path(), interaction, self.offer_id)
 
     @discord.ui.button(label="❌ Decline", style=discord.ButtonStyle.danger, row=1, custom_id="trade_offer_decline")
     async def decline(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         from Trade.services.trade_service import handle_offer_declined
         await interaction.response.defer(ephemeral=True)
+        # Delete the notification message from channel
+        if self.notification_message:
+            try: await self.notification_message.delete()
+            except Exception: pass
         await handle_offer_declined(_get_db_path(), interaction, self.offer_id)
 
 
@@ -455,8 +610,13 @@ class FindCardOwnerModal(discord.ui.Modal, title="Search Card"):
             owner_display = row.get("owner_display_name") or "Unknown / Unclaimed"
         embed = build_card_detail_embed(row=row, owner_display=owner_display)
 
-        if owner_id and str(owner_id) != str(self.user_id):
-            # Attach a Make Offer button to the card detail embed
+        # Show Make Offer if card belongs to someone else
+        # owner_id may be None if owner is a pending user — still show button using display name
+        can_offer = owner_id and str(owner_id) != str(self.user_id)
+        if not can_offer and not owner_id and row.get("owner_display_name"):
+            # Pending user owns it — we cannot make an offer without a discord_id
+            pass
+        if can_offer:
             view = CardDetailMakeOfferView(self.user_id, int(owner_id), item_code)
             await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
         else:

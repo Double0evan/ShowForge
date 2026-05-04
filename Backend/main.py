@@ -464,14 +464,28 @@ def api_bin_reassign(item_code: str, new_discord_display_name: str, refund_old: 
     item_code = item_code.strip().upper()
 
     with db_session(active.db_path) as conn:
-        # Find target user
+        from Core.normalize import normalize_name as _norm
+        # Prefer discord user, then any kind
         target = conn.execute(
-            "SELECT id FROM users WHERE display_name = ? AND kind = 'discord'",
-            (new_discord_display_name,)
+            "SELECT id FROM users WHERE normalized_name = ? ORDER BY CASE kind WHEN 'discord' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END LIMIT 1",
+            (_norm(new_discord_display_name),)
         ).fetchone()
         if not target:
-            raise HTTPException(status_code=404, detail=f"Discord user '{new_discord_display_name}' not found in show DB")
-        target_id = target["id"]
+            # Try exact display_name match as fallback
+            target = conn.execute(
+                "SELECT id FROM users WHERE display_name = ? LIMIT 1",
+                (new_discord_display_name,)
+            ).fetchone()
+        if not target:
+            cur = conn.execute(
+                "INSERT INTO users (kind, discord_user_id, display_name, normalized_name, created_at) "
+                "VALUES ('pending', NULL, ?, ?, datetime('now'))",
+                (new_discord_display_name, _norm(new_discord_display_name)),
+            )
+            target_id = cur.lastrowid
+        else:
+            target_id = target["id"]
+        print(f"[REASSIGN] target_id={target_id} for {new_discord_display_name}")
 
         # Check item exists
         item = conn.execute(
@@ -485,6 +499,19 @@ def api_bin_reassign(item_code: str, new_discord_display_name: str, refund_old: 
         remove_claim(active.db_path, item_code=item_code, refund=refund_old, reason="Staff reassign")
     except ClaimError:
         pass  # No existing claim — fine, just create the new one
+
+    # Force item back to available in case remove_claim didn't fully reset it
+    with db_session(active.db_path) as conn:
+        conn.execute(
+            "UPDATE inventory_items SET status = 'available' WHERE item_code = ?",
+            (item_code,)
+        )
+        # Also hard-remove any lingering active claim rows
+        conn.execute(
+            "UPDATE claims SET removed_at = datetime('now'), removed_reason = 'Staff reassign override' "
+            "WHERE item_code = ? AND removed_at IS NULL",
+            (item_code,)
+        )
 
     # Award voucher + create claim for new user
     # We always award first so the voucher balance check in create_claim passes.

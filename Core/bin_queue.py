@@ -144,9 +144,12 @@ def get_auction_log() -> list[dict]:
             winner_name TEXT, discord_name TEXT, claimed INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         )""")
-        rows = conn.execute(
-            "SELECT id, card_number, winner_name, discord_name, claimed, created_at FROM auction_log ORDER BY id ASC"
-        ).fetchall()
+        rows = conn.execute("""
+            SELECT ROW_NUMBER() OVER (ORDER BY id ASC) AS position,
+                   id, card_number, winner_name, discord_name, claimed, created_at
+            FROM auction_log
+            ORDER BY id ASC
+        """).fetchall()
         return [dict(r) for r in rows]
     finally:
         conn.close()
@@ -163,6 +166,44 @@ def update_auction_winner(auction_id: int, winner_name: str, discord_name: str) 
         return cur.rowcount > 0
     finally:
         conn.close()
+
+
+def get_auction_entry(auction_id: int) -> dict | None:
+    conn = _connect()
+    try:
+        row = conn.execute("""
+            SELECT * FROM (
+                SELECT ROW_NUMBER() OVER (ORDER BY id ASC) AS position,
+                       id, card_number, winner_name, discord_name, claimed, created_at
+                FROM auction_log
+            )
+            WHERE id=?
+        """, (auction_id,)).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def delete_auction_log_entry(auction_id: int) -> bool:
+    conn = _connect()
+    try:
+        cur = conn.execute("DELETE FROM auction_log WHERE id = ?", (auction_id,))
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def restamp_auction_claim_numbers(show_db_path) -> None:
+    from Core.db import db_session
+    rows = get_auction_log()
+    with db_session(show_db_path) as conn:
+        for row in rows:
+            item_code = f"N{int(row['card_number']):03d}"
+            conn.execute(
+                "UPDATE claims SET auction_number = ? WHERE item_code = ? AND removed_at IS NULL AND source = 'bin'",
+                (str(row["position"]), item_code),
+            )
 
 
 def clear_auction_log() -> int:

@@ -1934,12 +1934,41 @@ async function bsDelete(id) {
 async function bsOverride(id) {
   const name=prompt('Enter correct Discord display name:');
   if (!name) return;
-  _bsMatchCache[id]={ok:true,match:name.trim(),discord_id:'',score:1.0};
+  const trimmed = name.trim();
+  _bsMatchCache[id]={ok:true,match:trimmed,discord_id:'',score:1.0};
   const matchEl=document.getElementById('bsm-'+id);
-  if (matchEl) matchEl.innerHTML=`<span style="color:var(--blue);font-family:var(--mono)">${escHtml(name)} (override)</span>`;
-  const input=document.getElementById('bsi-'+id);
-  if (input) { input.disabled=false; input.style.opacity='1'; }
-  bsSubmit(id);
+  if (matchEl) matchEl.innerHTML=`<span style="color:var(--blue);font-family:var(--mono)">${escHtml(trimmed)} (override)</span>`;
+  const statusEl=document.getElementById('bss-'+id);
+  if (statusEl) statusEl.innerHTML='<span style="color:var(--dim)">reassigning...</span>';
+
+  // Get the card code for this row
+  const row = document.getElementById('bsr-'+id);
+  const codeEl = row ? row.querySelector('td:nth-child(2)') : null;
+  const itemCode = codeEl ? codeEl.textContent.trim() : null;
+
+  if (!itemCode) { toast('Could not find card code', 'err'); return; }
+
+  try {
+    const fd = new FormData();
+    fd.append('item_code', itemCode);
+    fd.append('new_discord_display_name', trimmed);
+    fd.append('refund_old', 'true');
+    const d = await fetch('/bin/reassign?item_code=' + encodeURIComponent(itemCode) + '&new_discord_display_name=' + encodeURIComponent(trimmed) + '&refund_old=true', {method:'POST'}).then(r=>r.json());
+    if (d.ok) {
+      if (statusEl) statusEl.innerHTML='<span style="color:var(--green)">✅ Reassigned</span>';
+      toast(itemCode + ' reassigned to ' + trimmed);
+    } else {
+      // If not yet claimed, fall back to normal assign
+      if (d.detail && d.detail.includes('not found') || (d.error && d.error.includes('not found'))) {
+        const input=document.getElementById('bsi-'+id);
+        if (input) { input.disabled=false; input.style.opacity='1'; }
+        bsSubmit(id);
+      } else {
+        if (statusEl) statusEl.innerHTML=`<span style="color:var(--red);font-size:11px">${escHtml(d.error||d.detail||'Failed')}</span>`;
+        toast(d.error||d.detail||'Reassign failed', 'err');
+      }
+    }
+  } catch(e) { toast('Network error', 'err'); }
 }
 
 async function bsLoadPreview(id, code) {

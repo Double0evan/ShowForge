@@ -39,7 +39,7 @@ def get_int_env(name: str, default: int | None = None) -> int:
 
 TOKEN                   = os.getenv("DISCORD_TOKEN", "")
 GUILD_ID                = get_int_env("GUILD_ID", 0)
-BACKEND_BASE_URL        = os.getenv("BACKEND_URL") or os.getenv("BACKEND_BASE_URL") or "http://127.0.0.1:8000"
+BACKEND_BASE_URL        = os.getenv("BACKEND_BASE_URL", "http://127.0.0.1:8000")
 CATALOG_SFW_CHANNEL_ID  = get_int_env("CATALOG_SFW_CHANNEL_ID")
 CATALOG_NSFW_CHANNEL_ID = get_int_env("CATALOG_NSFW_CHANNEL_ID")
 CLAIMS_SFW_CHANNEL_ID   = get_int_env("CLAIMS_SFW_CHANNEL_ID", 0)
@@ -182,7 +182,12 @@ async def on_member_join(member: discord.Member):
 
 @client.event
 async def on_message(message: discord.Message):
-    """Handle verify channel — user types Whatnot username to get verified."""
+    """Handle verify channel and bin listener."""
+    # Dispatch to bin listener if registered
+    handler = getattr(client, '_bin_message_handler', None)
+    if handler:
+        await handler(message)
+
     if message.author.bot:
         return
     if not message.guild:
@@ -760,20 +765,19 @@ def api_claims_summary(payload: dict):
         return {"ok": False, "error": str(e)}
 
     # Post trade summary to trade log thread and archive it
-    if TRADE_LOG_CHANNEL_ID:
+    trade_log_thread_id_str = None
+    try:
+        from Core.show_settings_service import get_setting as _get_show_setting
+        trade_log_thread_id_str = _get_show_setting(active.db_path, "trade_log_thread_id")
+    except Exception:
+        trade_log_thread_id_str = None
+    if trade_log_thread_id_str:
         async def _post_trade_summary():
             try:
-                from Core.show_settings_service import get_setting
-                from Core.show_service import require_active_show
                 from Trade.db.trade_db import ensure_trade_tables
                 from Core.db import db_session as _db_session
 
-                active = require_active_show()
-                thread_id_str = get_setting(active.db_path, "trade_log_thread_id")
-                if not thread_id_str:
-                    return
-
-                thread = client.get_channel(int(thread_id_str)) or await client.fetch_channel(int(thread_id_str))
+                thread = client.get_channel(int(trade_log_thread_id_str)) or await client.fetch_channel(int(trade_log_thread_id_str))
                 if not thread:
                     return
                 if getattr(thread, "archived", False):
@@ -829,46 +833,14 @@ def api_claims_summary(payload: dict):
             except Exception as e:
                 print(f"[TRADE LOG] Summary error: {e}")
 
-        asyncio.run_coroutine_threadsafe(_post_trade_summary(), _discord_loop)
+        trade_future = asyncio.run_coroutine_threadsafe(_post_trade_summary(), _discord_loop)
+        try:
+            trade_future.result(timeout=60)
+        except Exception as e:
+            print(f"[TRADE LOG] Summary wait error: {e}")
 
     return {"ok": True, "posted": posted, "rating": rating}
 
-
-
-@app.post("/bin/sale")
-def api_bin_sale(payload: dict):
-    """
-    Called by the Whatnot screen watcher when a sale is detected.
-    Pushes auction_number + username into the bin queue so the bot's
-    on_message handler can match it when the host types a bin number.
-    """
-    auction_number = payload.get("auction_number")
-    username       = payload.get("username", "").strip()
-    if not auction_number or not username:
-        return {"ok": False, "error": "auction_number and username required"}
-    try:
-        from Core.bin_queue import push_sale
-        row_id = push_sale(int(auction_number), username)
-        print(f"[BIN] Queued sale: auction #{auction_number} @{username} (id={row_id})")
-        return {"ok": True, "id": row_id}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
-
-@app.get("/bin/peek")
-def api_bin_peek():
-    """Returns the latest pending sale without consuming it."""
-    from Core.bin_queue import peek_latest_sale
-    sale = peek_latest_sale()
-    return {"ok": True, "sale": sale}
-
-
-@app.post("/bin/clear")
-def api_bin_clear():
-    """Clear all pending unmatched sales from the queue."""
-    from Core.bin_queue import clear_queue
-    n = clear_queue()
-    return {"ok": True, "cleared": n}
 
 
 @client.event
@@ -882,7 +854,7 @@ async def on_ready():
 
     # Register bin listener
     from Discord.bin_listener import register_bin_listener
-    register_bin_listener(client, core, bot_api_url="http://127.0.0.1:8001")
+    register_bin_listener(client, core)
     print("✅ Bin listener registered")
 
     # Register persistent views so buttons survive restarts
@@ -893,7 +865,16 @@ async def on_ready():
         from pathlib import Path as _Path
         client.add_view(TradeHomeView(None, 0, 0, 0, 1))
         client.add_view(TradeListingsView(None, 0))
-        client.add_view(TradeOfferResponseView(None, "dummy", 0))
+        try:
+            from Core.show_service import require_active_show as _active_show
+            from Core.db import db_session as _db_session
+            active = _active_show()
+            with _db_session(active.db_path) as conn:
+                pending = conn.execute("SELECT offer_id, receiver_user_id FROM trade_offers WHERE status='pending'").fetchall()
+            for row in pending:
+                client.add_view(TradeOfferResponseView(None, row["offer_id"], int(row["receiver_user_id"])))
+        except Exception as e:
+            print(f"⚠️  Could not register pending offer views: {e}")
         client.add_view(PublicListingView(None, "dummy", 0, "", [], [], None))
         print("✅ Persistent trade views registered")
     except Exception as e:
@@ -951,13 +932,13 @@ async def on_ready():
             print(f"✅ Member cache loaded: {count} members")
 
     def run_api():
-        uvicorn.run(app, host="127.0.0.1", port=8001, log_level="warning")
+        uvicorn.run(app, host=os.getenv("BOT_API_HOST", "127.0.0.1"), port=int(os.getenv("BOT_API_PORT", "8001")), log_level="warning")
 
     threading.Thread(target=run_api, daemon=True).start()
     print("✅ Bot internal API on port 8001")
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+# Trade admin endpoints
 
 
 
@@ -1129,6 +1110,7 @@ def api_trade_open_for_user(discord_user_id: str):
     return {"ok": True}
 
 
+# Entry point
 if __name__ == "__main__":
     if not TOKEN:
         raise RuntimeError("DISCORD_TOKEN missing — check Discord/.env")

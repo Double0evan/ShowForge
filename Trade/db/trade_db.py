@@ -95,30 +95,56 @@ def delete_trade_ui_message_id(conn,guild_id:int,user_id:int,message_type:str)->
     conn.execute("DELETE FROM trade_ui_messages WHERE guild_id=? AND user_id=? AND message_type=?",(str(guild_id),str(user_id),message_type))
     conn.commit()
 
+def _owned_by_discord_user_sql()->str:
+    return """(
+        u.discord_user_id=?
+        OR (
+            u.discord_user_id IS NULL
+            AND u.kind IN ('pending','guest')
+            AND u.normalized_name IN (
+                SELECT normalized_name FROM users
+                WHERE discord_user_id=? AND normalized_name IS NOT NULL
+            )
+        )
+    )"""
+
+def _watermarked_image_sql()->str:
+    return """COALESCE(
+        (SELECT ma.attachment_url FROM media_assets ma
+         WHERE ma.item_code=i.item_code AND ma.variant='watermarked'
+           AND ma.rating=(CASE WHEN i.item_code LIKE 'N%' THEN 'nsfw' ELSE 'sfw' END)
+         LIMIT 1),
+        (SELECT ma.attachment_url FROM media_assets ma
+         WHERE ma.item_code=i.item_code AND ma.variant='watermarked'
+         LIMIT 1)
+    ) AS image_url"""
+
 def get_user_card_count(conn, discord_user_id:int)->int:
-    row=conn.execute("""SELECT COUNT(*) FROM claims c JOIN users u ON c.user_id=u.id
-    WHERE u.discord_user_id=? AND c.removed_at IS NULL""",(str(discord_user_id),)).fetchone()
+    did=str(discord_user_id)
+    row=conn.execute(f"""SELECT COUNT(*) FROM claims c JOIN users u ON c.user_id=u.id
+    WHERE {_owned_by_discord_user_sql()} AND c.removed_at IS NULL""",(did,did)).fetchone()
     return int(row[0]) if row else 0
 
 def get_user_cards_page(conn, discord_user_id:int, page:int, page_size:int=3)->list[Any]:
-    return conn.execute("""SELECT i.item_code, i.post_mode, ma_wm.attachment_url AS image_url
+    did=str(discord_user_id)
+    return conn.execute(f"""SELECT i.item_code, i.post_mode, {_watermarked_image_sql()}
     FROM claims c JOIN users u ON c.user_id=u.id JOIN inventory_items i ON c.item_code=i.item_code
-    LEFT JOIN media_assets ma_wm ON ma_wm.item_code=i.item_code AND ma_wm.variant='watermarked'
-    WHERE u.discord_user_id=? AND c.removed_at IS NULL ORDER BY c.id LIMIT ? OFFSET ?""",(str(discord_user_id),page_size,page*page_size)).fetchall()
+    WHERE {_owned_by_discord_user_sql()} AND c.removed_at IS NULL ORDER BY c.id LIMIT ? OFFSET ?""",(did,did,page_size,page*page_size)).fetchall()
 
 def get_user_cards_all(conn, discord_user_id:int)->list[Any]:
-    return conn.execute("""SELECT i.item_code, i.post_mode, ma_wm.attachment_url AS image_url
+    did=str(discord_user_id)
+    return conn.execute(f"""SELECT i.item_code, i.post_mode, {_watermarked_image_sql()}
     FROM claims c JOIN users u ON c.user_id=u.id JOIN inventory_items i ON c.item_code=i.item_code
-    LEFT JOIN media_assets ma_wm ON ma_wm.item_code=i.item_code AND ma_wm.variant='watermarked'
-    WHERE u.discord_user_id=? AND c.removed_at IS NULL ORDER BY c.id""",(str(discord_user_id),)).fetchall()
+    WHERE {_owned_by_discord_user_sql()} AND c.removed_at IS NULL ORDER BY c.id""",(did,did)).fetchall()
 
 def search_card_by_item_code(conn,item_code:str)->Optional[Any]:
-    return conn.execute("""SELECT i.item_code, i.status, u.discord_user_id AS owner_discord_user_id,
-    u.display_name AS owner_display_name, ma_wm.attachment_url AS image_url
+    return conn.execute(f"""SELECT i.item_code, i.status, COALESCE(u.discord_user_id, du.discord_user_id) AS owner_discord_user_id,
+    COALESCE(du.display_name, u.display_name) AS owner_display_name, {_watermarked_image_sql()}
     FROM inventory_items i
     LEFT JOIN claims c ON c.item_code=i.item_code AND c.removed_at IS NULL
     LEFT JOIN users u ON c.user_id=u.id
-    LEFT JOIN media_assets ma_wm ON ma_wm.item_code=i.item_code AND ma_wm.variant='watermarked'
+    LEFT JOIN users du ON u.discord_user_id IS NULL AND u.kind IN ('pending','guest')
+        AND du.kind='discord' AND du.normalized_name=u.normalized_name AND du.discord_user_id IS NOT NULL
     WHERE i.item_code=?""",(item_code.strip().upper(),)).fetchone()
 
 def get_user_active_listing_count(conn, discord_user_id:int)->int:
@@ -179,6 +205,22 @@ def get_offer_requested_codes(conn,offer_id:str)->list[str]:
 def resolve_offer(conn,offer_id:str,status:str)->int:
     cur=conn.execute("UPDATE trade_offers SET status=?, resolved_at=CURRENT_TIMESTAMP WHERE offer_id=? AND status='pending'",(status,offer_id))
     return cur.rowcount
+
+def decline_conflicting_pending_offers(conn,accepted_offer_id:str,item_codes:list[str])->list[str]:
+    codes=[c for c in item_codes if c]
+    if not codes: return []
+    placeholders=",".join("?" for _ in codes)
+    rows=conn.execute(f"""SELECT DISTINCT o.offer_id
+    FROM trade_offers o
+    WHERE o.offer_id<>? AND o.status='pending' AND (
+        EXISTS (SELECT 1 FROM trade_offer_cards oc WHERE oc.offer_id=o.offer_id AND oc.item_code IN ({placeholders}))
+        OR EXISTS (SELECT 1 FROM trade_offer_requested_cards rc WHERE rc.offer_id=o.offer_id AND rc.item_code IN ({placeholders}))
+    )""",[accepted_offer_id,*codes,*codes]).fetchall()
+    ids=[r["offer_id"] for r in rows]
+    if ids:
+        id_placeholders=",".join("?" for _ in ids)
+        conn.execute(f"UPDATE trade_offers SET status='declined', resolved_at=CURRENT_TIMESTAMP WHERE offer_id IN ({id_placeholders})",ids)
+    return ids
 
 class TradeSwapError(Exception): pass
 
