@@ -48,6 +48,7 @@ VERIFY_CHANNEL_ID       = get_int_env("VERIFY_CHANNEL_ID", 0)
 VERIFIED_ROLE_ID        = get_int_env("VERIFIED_ROLE_ID", 0)
 UNVERIFIED_ROLE_ID      = get_int_env("UNVERIFIED_ROLE_ID", 0)
 NEWCOMER_ROLE_ID        = get_int_env("NEWCOMER_ROLE_ID", 0)
+HONEYPOT_CHANNEL_ID     = get_int_env("HONEYPOT_CHANNEL_ID", 0)
 UPLOAD_THREAD_RAW_SFW   = get_int_env("UPLOAD_THREAD_RAW_SFW")
 UPLOAD_THREAD_WM_SFW    = get_int_env("UPLOAD_THREAD_WM_SFW")
 UPLOAD_THREAD_RAW_NSFW  = get_int_env("UPLOAD_THREAD_RAW_NSFW")
@@ -192,6 +193,34 @@ async def on_message(message: discord.Message):
         return
     if not message.guild:
         return
+
+    # Honeypot — anyone who types here gets instantly banned + messages deleted
+    if HONEYPOT_CHANNEL_ID and message.channel.id == HONEYPOT_CHANNEL_ID:
+        member = message.guild.get_member(message.author.id)
+        bot_member = message.guild.get_member(client.user.id)
+        if member and bot_member:
+            if member.guild_permissions.administrator:
+                print(f"[HONEYPOT] Skipped admin: {message.author}")
+                return
+            if member.guild_permissions.manage_messages:
+                print(f"[HONEYPOT] Skipped mod: {message.author}")
+                return
+            if member.top_role >= bot_member.top_role:
+                print(f"[HONEYPOT] Skipped — role too high: {message.author}")
+                return
+        try:
+            await message.author.ban(reason="Honeypot triggered", delete_message_days=7)
+            print(f"[HONEYPOT] Banned {message.author} ({message.author.id})")
+            try:
+                await message.delete()
+            except Exception:
+                pass
+        except discord.Forbidden:
+            print(f"[HONEYPOT] Could not ban {message.author} — missing permissions")
+        except Exception as e:
+            print(f"[HONEYPOT] Error: {e}")
+        return
+
     if not VERIFY_CHANNEL_ID or message.channel.id != VERIFY_CHANNEL_ID:
         return
 
