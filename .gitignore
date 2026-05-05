@@ -1,0 +1,6 @@
+﻿Discord/.env
+DB/
+logs/
+__pycache__/
+*.pyc
+.venv/
