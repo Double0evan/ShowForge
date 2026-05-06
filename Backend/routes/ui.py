@@ -9,7 +9,6 @@ from Core.show_service import require_active_show
 from Core.show_manager import ShowManager
 from Core.media_service import get_media
 from Core.voucher_service import get_balance, staff_adjust, award_voucher
-from Core.user_service import find_pending_by_name, transfer_credits
 from Core.normalize import normalize_name
 from Core.db import db_session
 
@@ -37,7 +36,7 @@ def _find_repo_root() -> Path:
 
 REPO_ROOT = _find_repo_root()
 ENV_PATH  = REPO_ROOT / "Discord" / ".env"
-BOT_API   = "http://127.0.0.1:8001"
+BOT_API   = os.getenv("BOT_API_URL", "http://127.0.0.1:8001")
 shows     = ShowManager(REPO_ROOT)
 
 
@@ -65,8 +64,8 @@ def _list_past_shows() -> list[dict]:
     if active_file.exists():
         try:
             active_id = json.loads(active_file.read_text())["show_id"]
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[UI] Could not read active show file: {e}")
     result = []
     if shows_root.exists():
         for d in sorted(shows_root.iterdir(), reverse=True):
@@ -84,8 +83,8 @@ def _base_ctx(page: str, request: Request) -> dict:
         try:
             from Core.show_settings_service import get_setting
             show_type = get_setting(active.db_path, "show_type")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[UI] Could not load show_type setting: {e}")
     return {
         "request":        request,
         "page":           page,
@@ -164,15 +163,8 @@ def pick_file(accept: str = ""):
 # ── SHOW CONTROL ──────────────────────────────────────────────────────────────
 
 @router.post("/ui/show/new")
-def ui_new_show(date: str = Form(...), name: str = Form(...)):
+async def ui_new_show(date: str = Form(...), name: str = Form(...)):
     ref = shows.create_new_show(date, name)
-
-    # Clear auction log from previous show
-    try:
-        from Core.bin_queue import clear_auction_log
-        clear_auction_log()
-    except Exception as e:
-        print(f"[NEW_SHOW] Could not clear auction log: {e}")
 
     # Ask the bot to create the Discord archival claim threads
     discord_result = {}
@@ -237,27 +229,6 @@ async def ui_publish_all():
         except Exception as e:
             results.append({"ok": False, "error": str(e)})
     return {"ok": True, "results": results}
-
-
-@router.post("/ui/republish")
-async def ui_republish(item_code: str = Form(...)):
-    """Clear published_at and re-send to catalog — used when a Discord post was deleted."""
-    active    = require_active_show()
-    item_code = item_code.strip().upper()
-
-    with db_session(active.db_path) as conn:
-        row = conn.execute(
-            "SELECT status, post_mode FROM inventory_items WHERE item_code = ?", (item_code,)
-        ).fetchone()
-        if not row:
-            return {"ok": False, "message": f"{item_code} not found"}
-        if row["status"] != "available":
-            return {"ok": False, "message": f"{item_code} is {row['status']} — can only republish available items"}
-        conn.execute(
-            "UPDATE inventory_items SET published_at = NULL WHERE item_code = ?", (item_code,)
-        )
-
-    return await asyncio.to_thread(publish_item, item_code, active)
 
 
 @router.post("/ui/republish")
@@ -353,31 +324,6 @@ async def ui_claims_summary(rating: str = Form(...)):
         return {"ok": False, "error": str(e)}
 
 
-@router.post("/ui/claims/summary")
-async def ui_claims_summary(rating: str = Form(...)):
-    """
-    Delete all messages in the claims archival thread for the given rating,
-    then post a sorted summary grouped by user with RAW images attached.
-    """
-    rating = rating.strip().lower()
-    try:
-        r = requests.post(f"{BOT_API}/claims/summary", json={"rating": rating}, timeout=120)
-        return r.json()
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
-
-@router.post("/ui/claims/summary")
-async def ui_claims_summary(rating: str = Form(...)):
-    """Delete all messages in the claims thread, post sorted summary with RAW images."""
-    rating = rating.strip().lower()
-    try:
-        r = requests.post(f"{BOT_API}/claims/summary", json={"rating": rating}, timeout=120)
-        return r.json()
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
-
 # ── Bin Show Manager ─────────────────────────────────────────────────────────
 
 @router.get("/ui/binshow")
@@ -396,7 +342,7 @@ def ui_binshow_fuzzy(whatnot_name: str):
     import requests as _req, re
     # Fetch members from bot API (port 8001) — backend has no direct Discord access
     try:
-        r = _req.get("http://127.0.0.1:8001/members", timeout=5)
+        r = _req.get(f"{BOT_API}/members", timeout=5)
         data = r.json()
         members = data.get("verified", []) + data.get("unverified", [])
     except Exception as e:
@@ -421,7 +367,7 @@ def ui_binshow_fuzzy(whatnot_name: str):
 
     try:
         import requests as _req2
-        r2 = _req2.get("http://127.0.0.1:8001/members", timeout=5)
+        r2 = _req2.get(f"{BOT_API}/members", timeout=5)
         data2 = r2.json()
         members = data2.get("verified", []) + data2.get("unverified", [])
     except Exception as e2:
@@ -456,15 +402,12 @@ def ui_binshow_log():
 
 @router.delete("/ui/binshow/log/{auction_id}")
 def ui_binshow_log_delete(auction_id: int):
-    """Remove a row from the auction log and restamp claim auction numbers."""
+    """Remove a row from the auction log (wrong number typed)."""
     from Core.bin_queue import delete_auction_log_entry, restamp_auction_claim_numbers
+    active = require_active_show()
     deleted = delete_auction_log_entry(auction_id)
     if deleted:
-        try:
-            active = require_active_show()
-            restamp_auction_claim_numbers(active.db_path)
-        except Exception:
-            pass
+        restamp_auction_claim_numbers(active.db_path)
     return {"ok": True, "deleted": deleted}
 
 
@@ -481,17 +424,14 @@ def ui_binshow_log_assign(
     discord_name = discord_name.strip()
 
     # Get the card number for this auction
-    from Core.bin_queue import _connect, update_auction_winner
-    conn = _connect()
-    try:
-        row = conn.execute("SELECT card_number FROM auction_log WHERE id = ?", (auction_id,)).fetchone()
-    finally:
-        conn.close()
+    from Core.bin_queue import get_auction_entry, update_auction_winner
+    row = get_auction_entry(auction_id)
 
     if not row:
         return {"ok": False, "error": "Auction entry not found"}
 
     card_number = row["card_number"]
+    auction_number = row["position"]
     item_code   = f"N{card_number:03d}"
 
     try:
@@ -548,9 +488,9 @@ def ui_binshow_log_assign(
                 return {"ok": False, "error": f"{item_code} is already {existing['status']}"}
 
         award_voucher(active.db_path, user_id=user_id, reason="STAFF_ADJUST",
-                      note=f"Bin auction #{auction_id} card {item_code}")
+                      note=f"Bin auction #{auction_number} card {item_code}")
         create_claim(active.db_path, item_code=item_code, user_id=user_id,
-                     source="bin", auction_number=str(auction_id))
+                     source="bin", auction_number=str(auction_number))
         update_auction_winner(auction_id, whatnot_name, discord_name)
 
         # Ensure the user record has discord_user_id set
@@ -565,7 +505,7 @@ def ui_binshow_log_assign(
         with _dbs3(active.db_path) as conn3:
             conn3.execute(
                 "UPDATE claims SET auction_number = ? WHERE item_code = ? AND removed_at IS NULL",
-                (str(auction_id), item_code),
+                (str(auction_number), item_code),
             )
 
         # Open trade channel — search by name if no discord_id
@@ -573,13 +513,13 @@ def ui_binshow_log_assign(
             import requests as _req
             _open_id = discord_id
             if not _open_id:
-                sr = _req.get("http://127.0.0.1:8001/members/search",
+                sr = _req.get(f"{BOT_API}/members/search",
                               params={"q": discord_name, "limit": 1}, timeout=5)
                 results = sr.json().get("results", [])
                 if results:
                     _open_id = str(results[0].get("id", ""))
             if _open_id:
-                _req.post("http://127.0.0.1:8001/trade/open_for_user",
+                _req.post(f"{BOT_API}/trade/open_for_user",
                           params={"discord_user_id": _open_id}, timeout=10)
                 print(f"[BINSHOW] Trade channel opened for discord_id={_open_id}")
             else:
@@ -960,12 +900,12 @@ def ui_console(request: Request):
                     "SELECT id, display_name FROM users ORDER BY display_name ASC"
                 ).fetchall()
             ctx["users"] = [{"id": r["id"], "display_name": r["display_name"]} for r in rows]
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[UI] Console users load failed: {e}")
         try:
             ctx["items"] = list_inventory(active.db_path)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[UI] Console inventory load failed: {e}")
     return templates.TemplateResponse("index.html", ctx)
 
 
@@ -983,7 +923,8 @@ def ui_console_context():
         verified   = [m["display_name"] for m in data.get("verified",   []) if m.get("display_name")]
         unverified = [m["display_name"] for m in data.get("unverified", []) if m.get("display_name")]
         names = sorted(set(verified + unverified), key=str.lower)
-    except Exception:
+    except Exception as e:
+        print(f"[UI] Console member context load failed: {e}")
         names = []
 
     # Get item codes from active show DB
@@ -993,8 +934,8 @@ def ui_console_context():
         try:
             items = list_inventory(active.db_path)
             codes = [i["item_code"] for i in items if i["status"] not in ("removed", "claimed_removed")]
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[UI] Console item context load failed: {e}")
 
     return {"ok": True, "users": names, "codes": codes}
 
@@ -1029,7 +970,8 @@ async def ui_console_run(command: str = Form(...)):
                         (m for m in all_members if m.get("display_name", "").lower() == name_or_id.lower()),
                         None
                     )
-                except Exception:
+                except Exception as e:
+                    print(f"[UI] Console member lookup failed: {e}")
                     matched = None
 
                 if matched:
@@ -1200,311 +1142,6 @@ async def ui_settings_save(
     return {"ok": True}
 
 
-# ── Bin Show Manager ──────────────────────────────────────────────────────────
-
-@router.get("/ui/binshow")
-def ui_binshow(request: Request):
-    ctx = _base_ctx("binshow", request)
-    return templates.TemplateResponse("index.html", ctx)
-
-
-@router.get("/ui/binshow/log")
-def ui_binshow_log():
-    from Core.bin_queue import get_auction_log
-    return {"ok": True, "rows": get_auction_log()}
-
-
-@router.delete("/ui/binshow/log/{auction_id}")
-def ui_binshow_log_delete(auction_id: int):
-    from Core.bin_queue import _connect
-    conn = _connect()
-    try:
-        cur = conn.execute("DELETE FROM auction_log WHERE id = ?", (auction_id,))
-        conn.commit()
-        return {"ok": True, "deleted": cur.rowcount > 0}
-    finally:
-        conn.close()
-
-
-@router.post("/ui/binshow/log/clear")
-def ui_binshow_log_clear():
-    from Core.bin_queue import clear_auction_log
-    n = clear_auction_log()
-    return {"ok": True, "cleared": n}
-
-
-@router.get("/ui/binshow/fuzzy")
-def ui_binshow_fuzzy(whatnot_name: str):
-    import re, requests as _req
-    try:
-        r = _req.get("http://127.0.0.1:8001/members", timeout=5)
-        data = r.json()
-        members = data.get("verified", []) + data.get("unverified", [])
-    except Exception as e:
-        return {"ok": False, "match": None, "score": 0, "error": str(e)}
-
-    def _norm(s): return re.sub(r"[^a-z0-9]", "", s.lower())
-    def _sim(a, b):
-        if not a or not b: return 0.0
-        if a == b: return 1.0
-        m, n = len(a), len(b)
-        dp = [[0]*(n+1) for _ in range(m+1)]
-        for i in range(1, m+1):
-            for j in range(1, n+1):
-                dp[i][j] = dp[i-1][j-1]+1 if a[i-1]==b[j-1] else max(dp[i-1][j], dp[i][j-1])
-        return dp[m][n]/max(m,n)
-
-    target = _norm(whatnot_name.strip())
-    if not target:
-        return {"ok": False, "match": None, "score": 0}
-
-    best_name, best_id, best_score = None, None, 0.0
-    for m in members:
-        norm = _norm(m.get("display_name", ""))
-        if norm == target:
-            return {"ok": True, "match": m["display_name"], "discord_id": m["discord_id"], "score": 1.0}
-        score = _sim(target, norm)
-        if len(target) >= 4 and norm.endswith(target): score = max(score, 0.88)
-        parts = norm.split("_") if "_" in norm else []
-        if parts and target in parts: score = max(score, 0.92)
-        if score > best_score:
-            best_score, best_name, best_id = score, m.get("display_name"), m.get("discord_id")
-
-    if best_score >= 0.75:
-        return {"ok": True, "match": best_name, "discord_id": best_id, "score": round(best_score, 2)}
-    return {"ok": False, "match": best_name, "discord_id": best_id, "score": round(best_score, 2)}
-
-
-@router.get("/ui/binshow/preview")
-def ui_binshow_preview(item_code: str):
-    active = shows.get_active()
-    if not active:
-        return {"url": None}
-    rating = "nsfw" if item_code.startswith("N") else "sfw"
-    media  = get_media(active.db_path, item_code, "watermarked", rating)
-    return {"url": media["attachment_url"] if media else None}
-
-
-@router.get("/ui/binshow/state")
-def ui_binshow_state():
-    active = shows.get_active()
-    if not active:
-        return {"rows": {}}
-    claims = list_claims(active.db_path, include_removed=False)
-    rows = {}
-    for c in claims:
-        code = c["item_code"]
-        if not code.startswith("N"):
-            continue
-        try:
-            n = int(code[1:])
-        except ValueError:
-            continue
-        rows[str(n)] = {
-            "whatnot_name": c.get("user_display_name", ""),
-            "discord_name": c.get("user_display_name", ""),
-            "status": "done",
-        }
-    return {"rows": rows}
-
-
-@router.post("/ui/binshow/log/{auction_id}/assign")
-def ui_binshow_log_assign(
-    auction_id: int,
-    whatnot_name: str = Form(...),
-    discord_name: str = Form(...),
-    discord_id:   str = Form(""),
-):
-    active       = require_active_show()
-    whatnot_name = whatnot_name.strip()
-    discord_name = discord_name.strip()
-    discord_id   = discord_id.strip()
-
-    from Core.bin_queue import _connect as _bq_connect, update_auction_winner
-    conn = _bq_connect()
-    try:
-        row = conn.execute("SELECT card_number FROM auction_log WHERE id = ?", (auction_id,)).fetchone()
-    finally:
-        conn.close()
-
-    if not row:
-        return {"ok": False, "error": "Auction entry not found"}
-
-    card_number = row["card_number"]
-    item_code   = f"N{card_number:03d}"
-
-    try:
-        from Core.voucher_service import award_voucher as _award
-        from Core.claim_service import create_claim, ClaimError
-        from datetime import datetime, timezone
-
-        def _now():
-            return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-
-        with db_session(active.db_path) as conn2:
-            user_row = None
-            # Always prefer discord_id lookup
-            if discord_id:
-                user_row = conn2.execute(
-                    "SELECT id FROM users WHERE discord_user_id = ? LIMIT 1", (discord_id,)
-                ).fetchone()
-            # Fall back to discord-kind name match
-            if not user_row:
-                norm = normalize_name(discord_name)
-                user_row = conn2.execute(
-                    "SELECT id FROM users WHERE normalized_name = ? AND kind = 'discord' LIMIT 1", (norm,)
-                ).fetchone()
-            # Last resort any kind
-            if not user_row:
-                norm = normalize_name(discord_name)
-                user_row = conn2.execute(
-                    "SELECT id FROM users WHERE normalized_name = ? LIMIT 1", (norm,)
-                ).fetchone()
-
-            if user_row:
-                user_id = user_row["id"]
-            else:
-                norm = normalize_name(discord_name)
-                cur2 = conn2.execute(
-                    "INSERT INTO users (kind, discord_user_id, display_name, normalized_name, created_at) "
-                    "VALUES ('pending', ?, ?, ?, datetime('now'))",
-                    (discord_id or None, discord_name, norm),
-                )
-                user_id = cur2.lastrowid
-
-            existing = conn2.execute(
-                "SELECT status FROM inventory_items WHERE item_code = ?", (item_code,)
-            ).fetchone()
-            if not existing:
-                now = _now()
-                conn2.execute(
-                    "INSERT INTO inventory_items (item_code, status, post_mode, created_at, updated_at) "
-                    "VALUES (?, 'available', 'claim', ?, ?)",
-                    (item_code, now, now),
-                )
-            elif existing["status"] not in ("available",):
-                return {"ok": False, "error": f"{item_code} is already {existing['status']}"}
-
-        _award(active.db_path, user_id=user_id, reason="STAFF_ADJUST",
-               note=f"Bin auction #{auction_id} card {item_code}")
-        create_claim(active.db_path, item_code=item_code, user_id=user_id,
-                     source="bin", auction_number=str(auction_id))
-
-        # Stamp auction_number on claim
-        with db_session(active.db_path) as conn3:
-            conn3.execute(
-                "UPDATE claims SET auction_number = ? WHERE item_code = ? AND removed_at IS NULL",
-                (str(auction_id), item_code),
-            )
-
-        update_auction_winner(auction_id, whatnot_name, discord_name)
-
-        # Open trade channel
-        try:
-            import requests as _req
-            _open_id = discord_id
-            if not _open_id:
-                sr = _req.get("http://127.0.0.1:8001/members/search",
-                              params={"q": discord_name, "limit": 1}, timeout=5)
-                results = sr.json().get("results", [])
-                if results:
-                    _open_id = str(results[0].get("discord_id", ""))
-            if _open_id:
-                _req.post("http://127.0.0.1:8001/trade/open_for_user",
-                          params={"discord_user_id": _open_id}, timeout=10)
-                print(f"[BINSHOW] Trade channel opened for discord_id={_open_id}")
-            else:
-                print(f"[BINSHOW] Could not find discord_id for {discord_name}")
-        except Exception as e:
-            print(f"[BINSHOW] Trade channel error: {e}")
-
-        return {"ok": True, "item_code": item_code, "assigned_to": discord_name}
-
-    except ClaimError as e:
-        return {"ok": False, "error": e.message}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
-
-@router.post("/ui/inventory/assign")
-def ui_inventory_assign(item_code: str = Form(...), display_name: str = Form(...)):
-    active    = require_active_show()
-    item_code = item_code.strip().upper()
-    display_name = display_name.strip()
-    if not display_name:
-        return {"ok": False, "error": "Display name required"}
-    try:
-        from Core.voucher_service import award_voucher as _award
-        from Core.claim_service import create_claim, ClaimError
-        from datetime import datetime, timezone
-
-        def _now():
-            return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-
-        with db_session(active.db_path) as conn:
-            norm = normalize_name(display_name)
-            row  = conn.execute(
-                "SELECT id FROM users WHERE normalized_name = ? AND kind IN ('discord','pending','guest') LIMIT 1",
-                (norm,)
-            ).fetchone()
-            if row:
-                user_id = row["id"]
-            else:
-                cur = conn.execute(
-                    "INSERT INTO users (kind, discord_user_id, display_name, normalized_name, created_at) "
-                    "VALUES ('pending', NULL, ?, ?, datetime('now'))",
-                    (display_name, norm),
-                )
-                user_id = cur.lastrowid
-
-            existing = conn.execute(
-                "SELECT item_code FROM inventory_items WHERE item_code = ?", (item_code,)
-            ).fetchone()
-            if not existing:
-                now = _now()
-                conn.execute(
-                    "INSERT INTO inventory_items (item_code, status, post_mode, created_at, updated_at) "
-                    "VALUES (?, 'available', 'claim', ?, ?)",
-                    (item_code, now, now),
-                )
-
-        _award(active.db_path, user_id=user_id, reason="STAFF_ADJUST", note=f"Direct assign {item_code}")
-        create_claim(active.db_path, item_code=item_code, user_id=user_id, source="staff")
-        return {"ok": True, "item_code": item_code, "assigned_to": display_name}
-
-    except ClaimError as e:
-        return {"ok": False, "error": e.message}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
-
-@router.post("/ui/claims/set_auction")
-def ui_claims_set_auction(item_code: str = Form(...), auction_number: str = Form(...)):
-    active = require_active_show()
-    item_code = item_code.strip().upper()
-    num = auction_number.strip() or None
-    try:
-        with db_session(active.db_path) as conn:
-            cur = conn.execute(
-                "UPDATE claims SET auction_number = ? WHERE item_code = ? AND removed_at IS NULL",
-                (num, item_code),
-            )
-            if cur.rowcount == 0:
-                return {"ok": False, "error": f"No active claim found for {item_code}"}
-        return {"ok": True, "item_code": item_code, "auction_number": num}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
-
-@router.post("/trade/refresh_all")
-def trade_refresh_all_proxy():
-    try:
-        r = requests.post("http://127.0.0.1:8001/trade/refresh_all", timeout=120)
-        return r.json()
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
-
 @router.get("/ui/show/reset_claims")
 @router.post("/ui/show/reset_claims")
 def ui_show_reset_claims():
@@ -1522,3 +1159,102 @@ def ui_show_reset_claims():
         return {"ok": True, "message": "Claims, users, vouchers wiped. Inventory reset to available."}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+# ── Server-side image upload ──────────────────────────────────────────────────
+
+@router.post("/ui/upload")
+async def ui_upload(
+    rating: str = Form(...),
+    files: list[UploadFile] = File(...),
+):
+    """
+    Upload images directly from browser.
+    Server watermarks and uploads to Discord — no local watcher needed.
+    """
+    import asyncio, io, shutil, tempfile
+    from pathlib import Path as _Path
+    from datetime import datetime as _dt, timezone as _tz
+
+    active = require_active_show()
+    rating = rating.lower().strip()
+    if rating not in ("sfw", "nsfw"):
+        return {"ok": False, "error": "Invalid rating"}
+
+    env = _env()
+    parent     = _Path(env.get("WATCHER_PARENT_DIR", "/home/v3bot"))
+    template_p = _Path(env.get(f"WM_TEMPLATE_{'NSFW' if rating == 'nsfw' else 'SFW'}", f"/home/v3bot/templates/{rating}.png"))
+    bot_api    = env.get("BOT_API_URL", BOT_API)
+
+    # State DB for item code allocation
+    from Watcher.watcher_service import StateDB, watermark, compress_image, upsert_media
+    state_root = parent / "shows" / active.show_id / "_state"
+    state_root.mkdir(parents=True, exist_ok=True)
+    state = StateDB(state_root / "watcher.sqlite")
+
+    results = []
+    for file in files:
+        try:
+            ext      = _Path(file.filename).suffix.lower() or ".jpg"
+            raw_data = await file.read()
+
+            # Save to temp file
+            with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+                tmp.write(raw_data)
+                tmp_path = _Path(tmp.name)
+
+            # Allocate code and move to show folder
+            item_code = state.allocate_code(rating)
+            show_root = parent / "shows" / active.show_id
+            raw_dir   = show_root / ("SFW" if rating == "sfw" else "NSFW") / "RAW"
+            wm_dir    = show_root / ("SFW" if rating == "sfw" else "NSFW") / "Watermarked"
+            raw_dir.mkdir(parents=True, exist_ok=True)
+            wm_dir.mkdir(parents=True, exist_ok=True)
+
+            raw_dst = raw_dir / f"{item_code}{ext}"
+            wm_dst  = wm_dir  / f"{item_code}.jpg"
+
+            shutil.copy2(tmp_path, raw_dst)
+            tmp_path.unlink(missing_ok=True)
+
+            compress_image(raw_dst)
+            watermark(raw_dst, wm_dst, template_p)
+            compress_image(wm_dst)
+
+            # Upsert inventory
+            from Core.inventory_service import next_inventory_code
+            # item_code already allocated via StateDB — just insert it
+            from Core.db import db_session
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+            with db_session(active.db_path) as conn:
+                existing = conn.execute("SELECT item_code FROM inventory_items WHERE item_code=?", (item_code,)).fetchone()
+                if not existing:
+                    conn.execute(
+                        "INSERT INTO inventory_items (item_code, status, post_mode, created_at, updated_at) VALUES (?, 'available', 'claim', ?, ?)",
+                        (item_code, now, now)
+                    )
+
+            # Upload RAW and WM to Discord via bot API
+            import requests as _req
+
+            def _upload_file(variant, path):
+                thread_key = f"UPLOAD_THREAD_{'RAW' if variant == 'raw' else 'WM'}_{rating.upper()}"
+                thread_id  = env.get(thread_key, "0")
+                r = _req.post(
+                    f"{bot_api}/upload_media",
+                    data={"item_code": item_code, "variant": variant, "rating": rating, "thread_id": thread_id},
+                    files={"file": (path.name, open(path, "rb"))},
+                    timeout=30,
+                )
+                return r.json()
+
+            raw_result = _upload_file("raw", raw_dst)
+            wm_result  = _upload_file("watermarked", wm_dst)
+
+            results.append({"ok": True, "item_code": item_code, "raw": raw_result, "wm": wm_result})
+
+        except Exception as e:
+            results.append({"ok": False, "error": str(e), "file": file.filename})
+
+    return {"ok": True, "results": results}
