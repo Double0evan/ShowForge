@@ -324,7 +324,7 @@ input[type=checkbox]{accent-color:var(--blue);width:14px;height:14px;cursor:poin
       <span class="drop-icon">🖼️</span>
       <div class="drop-tag tag-sfw">SFW</div>
       <div class="drop-label">Drop images or click to browse</div>
-      <div class="drop-sub">→ Watcher INBOX / SFW</div>
+      <div class="drop-sub">→ Uploads directly to Discord</div>
       <div class="drop-log" id="log-sfw"></div>
     </div>
     <div class="drop-zone nsfw-zone" id="drop-nsfw" ondragover="onDragOver(event,this)" ondragleave="onDragLeave(this)" ondrop="onDrop(event,'nsfw')">
@@ -332,7 +332,7 @@ input[type=checkbox]{accent-color:var(--blue);width:14px;height:14px;cursor:poin
       <span class="drop-icon">🔞</span>
       <div class="drop-tag tag-nsfw">NSFW</div>
       <div class="drop-label">Drop images or click to browse</div>
-      <div class="drop-sub">→ Watcher INBOX / NSFW</div>
+      <div class="drop-sub">→ Uploads directly to Discord</div>
       <div class="drop-log" id="log-nsfw"></div>
     </div>
   </div>
@@ -404,7 +404,7 @@ input[type=checkbox]{accent-color:var(--blue);width:14px;height:14px;cursor:poin
     </table>
   </div>
   {% else %}
-  <div class="empty"><span class="empty-icon">📦</span><div class="empty-title">No inventory yet</div><div class="empty-sub">Drop images above to queue them for the watcher</div></div>
+  <div class="empty"><span class="empty-icon">📦</span><div class="empty-title">No inventory yet</div><div class="empty-sub">Drop images above to upload them</div></div>
   {% endif %}
 </div>
 {% endif %}
@@ -1408,10 +1408,13 @@ async function uploadFiles(files,rating){
   log.textContent=`Uploading ${files.length} file(s)…`;log.style.color='var(--orange)';
   const fd=new FormData();fd.append('rating',rating);for(const f of files)fd.append('files',f);
   try{
-    const d=await fetch('/ui/inbox/upload',{method:'POST',body:fd}).then(r=>r.json());
-    if(d.saved?.length){log.textContent=`✓ ${d.saved.length} queued`;log.style.color='var(--green)';toast(`${d.saved.length} → ${rating.toUpperCase()} inbox`)}
-    if(d.errors?.length){log.textContent=`⚠ ${d.errors[0]}`;log.style.color='var(--red)';toast('Some files failed','err')}
-  }catch{log.textContent='Upload failed';log.style.color='var(--red)';toast('Network error','err')}
+    const d=await fetch('/ui/upload',{method:'POST',body:fd}).then(r=>r.json());
+    const ok=d.results?.filter(r=>r.ok)||[];
+    const fail=d.results?.filter(r=>!r.ok)||[];
+    if(ok.length){log.textContent=`✓ ${ok.length} uploaded`;log.style.color='var(--green)';toast(`${ok.length} → ${rating.toUpperCase()} uploaded`)}
+    if(fail.length){log.textContent=`⚠ ${fail[0].error||'failed'}`;log.style.color='var(--red)';toast('Some files failed','err')}
+    if(!d.ok){log.textContent=d.error||'Upload failed';log.style.color='var(--red)';toast(d.error||'Upload failed','err')}
+  }catch(e){log.textContent='Upload failed';log.style.color='var(--red)';toast('Network error','err')}
 }
 
 // ── Browse ────────────────────────────────────────────────────────────────────
