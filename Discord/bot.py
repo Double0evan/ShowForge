@@ -645,8 +645,7 @@ def api_upload_media(
     thread_id: str = FormField(...),
     file: UploadFile = File(...),
 ):
-    """Upload a file to a Discord thread and store media record in backend."""
-    import io
+    import asyncio, io
     raw_bytes = file.file.read()
     filename  = file.filename
 
