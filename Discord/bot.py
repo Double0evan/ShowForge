@@ -14,7 +14,7 @@ import requests
 import uvicorn
 from discord import app_commands
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, UploadFile, File, Form as FormField
 from fastapi.responses import JSONResponse
 
 from Discord.bot_instance import client
@@ -635,6 +635,46 @@ def api_watcher_stop():
     """Pause watcher processing — files stay in inbox until started again."""
     _set_flag(False)
     return {"ok": True, "message": "Processing paused"}
+
+
+@app.post("/upload_media")
+def api_upload_media(
+    item_code: str = FormField(...),
+    variant: str = FormField(...),
+    rating: str = FormField(...),
+    thread_id: str = FormField(...),
+    file: UploadFile = File(...),
+):
+    """Upload a file to a Discord thread and store media record in backend."""
+    import io
+    raw_bytes = file.file.read()
+    filename  = file.filename
+
+    async def _send():
+        ch = client.get_channel(int(thread_id)) or await client.fetch_channel(int(thread_id))
+        if getattr(ch, "archived", False):
+            await ch.edit(archived=False)
+        msg = await ch.send(file=discord.File(fp=io.BytesIO(raw_bytes), filename=filename))
+        att = msg.attachments[0]
+        import requests as _req
+        _req.post(
+            f"{BACKEND_BASE_URL}/media/upsert",
+            params={
+                "item_code": item_code,
+                "variant": variant,
+                "rating": rating,
+                "source_channel_id": thread_id,
+                "source_message_id": str(msg.id),
+                "attachment_url": att.url,
+                "filename": att.filename,
+                "content_type": att.content_type or "",
+            },
+            timeout=20,
+        )
+        return {"ok": True, "attachment_url": att.url, "message_id": msg.id}
+
+    future = asyncio.run_coroutine_threadsafe(_send(), _discord_loop)
+    return future.result(timeout=30)
 
 
 @app.post("/publish")
