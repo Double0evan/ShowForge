@@ -1405,16 +1405,18 @@ async function onFileInput(e,rating){await uploadFiles(e.target.files,rating)}
 async function uploadFiles(files,rating){
   if(!files?.length)return;
   const log=document.getElementById(`log-${rating}`);
-  log.textContent=`Uploading ${files.length} file(s)…`;log.style.color='var(--orange)';
-  const fd=new FormData();fd.append('rating',rating);for(const f of files)fd.append('files',f);
-  try{
-    const d=await fetch('/ui/upload',{method:'POST',body:fd}).then(r=>r.json());
-    const ok=d.results?.filter(r=>r.ok)||[];
-    const fail=d.results?.filter(r=>!r.ok)||[];
-    if(ok.length){log.textContent=`✓ ${ok.length} uploaded`;log.style.color='var(--green)';toast(`${ok.length} → ${rating.toUpperCase()} uploaded`)}
-    if(fail.length){log.textContent=`⚠ ${fail[0].error||'failed'}`;log.style.color='var(--red)';toast('Some files failed','err')}
-    if(!d.ok){log.textContent=d.error||'Upload failed';log.style.color='var(--red)';toast(d.error||'Upload failed','err')}
-  }catch(e){log.textContent='Upload failed';log.style.color='var(--red)';toast('Network error','err')}
+  let ok=0,fail=0,total=files.length;
+  for(let i=0;i<files.length;i++){
+    log.textContent=`Uploading ${i+1}/${total}…`;log.style.color='var(--orange)';
+    const fd=new FormData();fd.append('rating',rating);fd.append('files',files[i]);
+    try{
+      const d=await fetch('/ui/upload',{method:'POST',body:fd}).then(r=>r.json());
+      if(d.results?.[0]?.ok){ok++;}
+      else{fail++;console.error('Upload error:',d.results?.[0]?.error||d.error);}
+    }catch(e){fail++;console.error('Network error:',e);}
+  }
+  if(ok>0){log.textContent=`✓ ${ok}/${total} uploaded`;log.style.color='var(--green)';toast(`${ok} → ${rating.toUpperCase()} uploaded`)}
+  if(fail>0){log.textContent=`⚠ ${fail} failed`;log.style.color='var(--red)';toast(`${fail} file(s) failed`,'err')}
 }
 
 // ── Browse ────────────────────────────────────────────────────────────────────
