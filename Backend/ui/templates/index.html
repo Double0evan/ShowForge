@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>V3 Panel{% if active_show %} · {{ active_show }}{% endif %}</title>
+<title>ShowForge{% if active_show %} · {{ active_show }}{% endif %}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=DM+Sans:wght@400;500;600&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
@@ -250,7 +250,7 @@ input[type=checkbox]{accent-color:var(--blue);width:14px;height:14px;cursor:poin
 <!-- ═══════════════ SIDEBAR ═══════════════ -->
 <aside class="sidebar">
   <div class="logo">
-    <div class="logo-mark">V3 Panel</div>
+    <div class="logo-mark">ShowForge</div>
     <div class="logo-sub">Show Manager</div>
   </div>
   <nav class="nav">
@@ -1415,7 +1415,10 @@ async function uploadFiles(files,rating){
       else{fail++;console.error('Upload error:',d.results?.[0]?.error||d.error);}
     }catch(e){fail++;console.error('Network error:',e);}
   }
-  if(ok>0){log.textContent=`✓ ${ok}/${total} uploaded`;log.style.color='var(--green)';toast(`${ok} → ${rating.toUpperCase()} uploaded`)}
+  if(ok>0){log.textContent=`✓ ${ok}/${total} uploaded`;log.style.color='var(--green)';toast(`${ok} → ${rating.toUpperCase()} uploaded`);
+    // Auto-refresh inventory after all uploads complete
+    setTimeout(()=>window.location.reload(), 1500);
+  }
   if(fail>0){log.textContent=`⚠ ${fail} failed`;log.style.color='var(--red)';toast(`${fail} file(s) failed`,'err')}
 }
 
