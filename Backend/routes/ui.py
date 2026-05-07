@@ -872,6 +872,88 @@ def ui_watcher_stop():
 
 # ── HISTORY ───────────────────────────────────────────────────────────────────
 
+@router.post("/ui/history/delete")
+def ui_history_delete(show_id: str = Form(...)):
+    """Permanently delete a show and all its data."""
+    import shutil
+    shows_root = REPO_ROOT / "DB" / "shows"
+    show_dir   = shows_root / show_id
+
+    # Safety: don't delete active show
+    active = shows.get_active()
+    if active and active.show_id == show_id:
+        return {"ok": False, "error": "Cannot delete the active show. End the show first."}
+
+    if not show_dir.exists():
+        return {"ok": False, "error": f"Show '{show_id}' not found."}
+
+    try:
+        shutil.rmtree(show_dir)
+        return {"ok": True, "deleted": show_id}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@router.get("/ui/history/download")
+def ui_history_download(show_id: str, variant: str = "watermarked"):
+    """
+    Download a zip of images for a show.
+    variant: 'watermarked', 'raw', or 'both'
+    """
+    import zipfile, io
+    from fastapi.responses import StreamingResponse
+
+    shows_root = REPO_ROOT / "DB" / "shows"
+    show_dir   = shows_root / show_id
+
+    if not show_dir.exists():
+        from fastapi import HTTPException
+        raise HTTPException(404, f"Show '{show_id}' not found")
+
+    # Build zip in memory
+    zip_buffer = io.BytesIO()
+    count = 0
+
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        # Look in show folder for images
+        show_folder = REPO_ROOT.parent / "shows" / show_id if (REPO_ROOT.parent / "shows" / show_id).exists() else None
+
+        # Also check WATCHER_PARENT_DIR/shows/show_id
+        env = _env()
+        parent = Path(env.get("WATCHER_PARENT_DIR", str(REPO_ROOT)))
+        alt_folder = Path(parent) / "shows" / show_id
+
+        folder = show_folder or (alt_folder if alt_folder.exists() else None)
+
+        if folder and folder.exists():
+            for rating in ("SFW", "NSFW"):
+                for var in ("RAW", "Watermarked"):
+                    if variant == "watermarked" and var == "RAW":
+                        continue
+                    if variant == "raw" and var == "Watermarked":
+                        continue
+                    img_dir = folder / rating / var
+                    if not img_dir.exists():
+                        continue
+                    for img in sorted(img_dir.iterdir()):
+                        if img.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp"):
+                            arc_name = f"{rating}/{var}/{img.name}" if variant == "both" else img.name
+                            zf.write(img, arc_name)
+                            count += 1
+
+    if count == 0:
+        from fastapi import HTTPException
+        raise HTTPException(404, "No images found for this show. Images may only exist on Discord CDN.")
+
+    zip_buffer.seek(0)
+    filename = f"{show_id}_{variant}.zip"
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @router.get("/ui/history")
 def ui_history(request: Request, show_id: str = ""):
     ctx               = _base_ctx("history", request)

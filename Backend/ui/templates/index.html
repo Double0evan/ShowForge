@@ -831,17 +831,31 @@ input[type=checkbox]{accent-color:var(--blue);width:14px;height:14px;cursor:poin
     <div class="show-list">
       <div class="show-list-header">All Shows</div>
       {% for s in past_shows %}
-      <a href="/ui/history?show_id={{ s.show_id }}"
-        class="show-list-item {% if selected_show == s.show_id %}selected{% endif %} {% if s.is_active %}is-active{% endif %}">
-        <div>{{ s.show_id }}</div>
-        {% if s.is_active %}<div style="color:var(--green);font-size:9px;margin-top:2px">● ACTIVE</div>{% endif %}
-        {% if s.item_count is defined %}<div style="color:var(--dim);font-size:9px;margin-top:1px">{{ s.item_count }} items · {{ s.claim_count or 0 }} claims</div>{% endif %}
-      </a>
+      <div class="show-list-item-wrap" style="display:flex;align-items:center;gap:4px">
+        <a href="/ui/history?show_id={{ s.show_id }}"
+          class="show-list-item {% if selected_show == s.show_id %}selected{% endif %} {% if s.is_active %}is-active{% endif %}"
+          style="flex:1;min-width:0">
+          <div>{{ s.show_id }}</div>
+          {% if s.is_active %}<div style="color:var(--green);font-size:9px;margin-top:2px">● ACTIVE</div>{% endif %}
+          {% if s.item_count is defined %}<div style="color:var(--dim);font-size:9px;margin-top:1px">{{ s.item_count }} items · {{ s.claim_count or 0 }} claims</div>{% endif %}
+        </a>
+        {% if not s.is_active %}
+        <button class="btn btn-red btn-xs" title="Delete show" style="flex-shrink:0;padding:2px 6px;font-size:10px"
+          onclick="deleteShow('{{ s.show_id }}')">✕</button>
+        {% endif %}
+      </div>
       {% endfor %}
     </div>
     <div>
       {% if selected_show %}
-      <div class="notice notice-info">📖 Viewing: <strong>{{ selected_show }}</strong> — read-only</div>
+      <div class="notice notice-info" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+        <span>📖 Viewing: <strong>{{ selected_show }}</strong> — read-only</span>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <button class="btn btn-ghost btn-sm" onclick="downloadShow('{{ selected_show }}','watermarked')">⬇ Watermarked</button>
+          <button class="btn btn-ghost btn-sm" onclick="downloadShow('{{ selected_show }}','raw')">⬇ RAW</button>
+          <button class="btn btn-ghost btn-sm" onclick="downloadShow('{{ selected_show }}','both')">⬇ Both</button>
+        </div>
+      </div>
       <div class="htabs">
         <button class="htab active" onclick="switchHTab(this,'ht-inventory')">Inventory ({{ items|length }})</button>
         <button class="htab" onclick="switchHTab(this,'ht-claims')">Claims ({{ claims|length }})</button>
@@ -1781,6 +1795,20 @@ async function quickAward() {
 
 // ── History tabs ──────────────────────────────────────────────────────────────
 {% if page == 'history' %}
+async function deleteShow(showId) {
+  if (!confirm(`Permanently delete show "${showId}"? This cannot be undone.`)) return;
+  const fd = new FormData();
+  fd.append('show_id', showId);
+  const d = await fetch('/ui/history/delete', {method:'POST', body:fd}).then(r=>r.json());
+  if (d.ok) { toast(`Deleted ${showId}`); window.location.href = '/ui/history'; }
+  else { toast(d.error || 'Delete failed', 'err'); }
+}
+
+function downloadShow(showId, variant) {
+  toast(`Preparing ${variant} download…`);
+  window.location.href = `/ui/history/download?show_id=${encodeURIComponent(showId)}&variant=${variant}`;
+}
+
 function switchHTab(btn,targetId){
   document.querySelectorAll('.htab').forEach(b=>b.classList.remove('active'));
   document.querySelectorAll('.htab-content').forEach(c=>c.classList.remove('active'));
