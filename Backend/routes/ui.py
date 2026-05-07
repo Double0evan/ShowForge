@@ -1240,14 +1240,31 @@ async def ui_upload(
 
             def _upload_file(variant, path):
                 thread_key = f"UPLOAD_THREAD_{'RAW' if variant == 'raw' else 'WM'}_{rating.upper()}"
-                thread_id  = env.get(thread_key, "0")
+                thread_id  = env.get(thread_key, "0").strip().strip("'").strip('"')
                 r = _req.post(
                     f"{bot_api}/upload_media",
                     data={"item_code": item_code, "variant": variant, "rating": rating, "thread_id": thread_id},
                     files={"file": (path.name, open(path, "rb"))},
-                    timeout=30,
+                    timeout=60,
                 )
-                return r.json()
+                result = r.json()
+                # Backend registers media after bot returns URL (avoids deadlock)
+                if result.get("ok") and result.get("attachment_url"):
+                    _req.post(
+                        f"http://127.0.0.1:8000/media/upsert",
+                        params={
+                            "item_code": item_code,
+                            "variant": variant,
+                            "rating": rating,
+                            "source_channel_id": thread_id,
+                            "source_message_id": str(result.get("message_id", "")),
+                            "attachment_url": result["attachment_url"],
+                            "filename": result.get("filename", path.name),
+                            "content_type": result.get("content_type", ""),
+                        },
+                        timeout=10,
+                    )
+                return result
 
             raw_result = _upload_file("raw", raw_dst)
             wm_result  = _upload_file("watermarked", wm_dst)

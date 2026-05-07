@@ -655,22 +655,9 @@ def api_upload_media(
             await ch.edit(archived=False)
         msg = await ch.send(file=discord.File(fp=io.BytesIO(raw_bytes), filename=filename))
         att = msg.attachments[0]
-        import requests as _req
-        _req.post(
-            f"{BACKEND_BASE_URL}/media/upsert",
-            params={
-                "item_code": item_code,
-                "variant": variant,
-                "rating": rating,
-                "source_channel_id": thread_id,
-                "source_message_id": str(msg.id),
-                "attachment_url": att.url,
-                "filename": att.filename,
-                "content_type": att.content_type or "",
-            },
-            timeout=20,
-        )
-        return {"ok": True, "attachment_url": att.url, "message_id": msg.id}
+        # Return URL to caller — backend registers it to avoid deadlock
+        return {"ok": True, "attachment_url": att.url, "filename": att.filename,
+                "content_type": att.content_type or "", "message_id": msg.id}
 
     future = asyncio.run_coroutine_threadsafe(_send(), _discord_loop)
     return future.result(timeout=30)
