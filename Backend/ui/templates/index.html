@@ -261,7 +261,7 @@ input[type=checkbox]{accent-color:var(--blue);width:14px;height:14px;cursor:poin
     <a href="/ui/members"  class="{% if page=='members'   %}active{% endif %}"><span class="nav-icon">🌐</span> Members</a>
     <div class="nav-section">Tools</div>
     <a href="/ui/binshow" class="{% if page=='binshow'   %}active{% endif %}"><span class="nav-icon">🎯</span> Bin Manager</a>
-    <a href="/ui/watcher"  class="{% if page=='watcher'   %}active{% endif %}"><span class="nav-icon">👁</span> Watcher</a>
+    
     <a href="/ui/console"  class="{% if page=='console'   %}active{% endif %}"><span class="nav-icon">💻</span> Console</a>
     <a href="/ui/history"  class="{% if page=='history'   %}active{% endif %}"><span class="nav-icon">🗂</span> History</a>
     <div class="nav-section">Config</div>
@@ -311,8 +311,7 @@ input[type=checkbox]{accent-color:var(--blue);width:14px;height:14px;cursor:poin
         style="background:transparent;color:var(--dim);transition:all .15s">🎯 Bin Show</button>
     </div>
 
-    <!-- Screen Watcher -->
-    <button id="btn-watcher" class="btn btn-purple btn-sm" onclick="startWatcher()">📺 Screen Watcher</button>
+
 
     <button class="btn btn-ghost btn-sm" onclick="publishAll()">↑ Publish All to Catalog</button>
   </div>
