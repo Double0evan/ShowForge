@@ -192,11 +192,17 @@ async def ui_new_show(date: str = Form(...), name: str = Form(...)):
 
 
 @router.post("/ui/show/end")
-async def ui_end_show():
+def ui_end_show():
     active = shows.get_active()
     if not active:
         return {"ok": False, "error": "No active show"}
     shows.clear_active()
+    # Clear auction log on show end
+    try:
+        from Core.bin_queue import clear_auction_log
+        clear_auction_log()
+    except Exception:
+        pass
     return {"ok": True, "ended": active.show_id}
 
 
