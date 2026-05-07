@@ -145,6 +145,17 @@ class StateDB:
         con.commit()
         con.close()
 
+    def _force_code(self, rating: RATING, number: int) -> None:
+        """Ensure the counter is at least past this number (don't fill gaps)."""
+        con = sqlite3.connect(self.db_path, timeout=10)
+        cur = con.cursor()
+        cur.execute("SELECT next_num FROM counters WHERE rating=?", (rating,))
+        current = int(cur.fetchone()[0])
+        if number >= current:
+            cur.execute("UPDATE counters SET next_num=? WHERE rating=?", (number + 1, rating))
+            con.commit()
+        con.close()
+
     def allocate_code(self, rating: RATING) -> str:
         con = sqlite3.connect(self.db_path, timeout=10)
         cur = con.execute("SELECT next_num FROM counters WHERE rating=?", (rating,))

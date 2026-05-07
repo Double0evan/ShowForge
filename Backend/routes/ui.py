@@ -1203,8 +1203,17 @@ async def ui_upload(
                 tmp.write(raw_data)
                 tmp_path = _Path(tmp.name)
 
-            # Allocate code and move to show folder
-            item_code = state.allocate_code(rating)
+            # Allocate code — use filename number if it's a 3-digit number
+            import re as _re
+            _fname_stem = _Path(file.filename).stem
+            _fname_match = _re.fullmatch(r'\d{3}', _fname_stem)
+            if _fname_match:
+                prefix = "S" if rating == "sfw" else "N"
+                item_code = f"{prefix}{_fname_stem}"
+                # Register this number in StateDB so sequential allocator skips past it
+                state._force_code(rating, int(_fname_stem))
+            else:
+                item_code = state.allocate_code(rating)
             show_root = parent / "shows" / active.show_id
             raw_dir   = show_root / ("SFW" if rating == "sfw" else "NSFW") / "RAW"
             wm_dir    = show_root / ("SFW" if rating == "sfw" else "NSFW") / "Watermarked"
