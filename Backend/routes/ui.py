@@ -166,6 +166,12 @@ def pick_file(accept: str = ""):
 async def ui_new_show(date: str = Form(...), name: str = Form(...)):
     ref = shows.create_new_show(date, name)
 
+    try:
+        from Core.bin_queue import clear_auction_log
+        clear_auction_log()
+    except Exception:
+        pass
+
     # Ask the bot to create the Discord archival claim threads
     discord_result = {}
     try:
