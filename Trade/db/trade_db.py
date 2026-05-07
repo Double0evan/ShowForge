@@ -71,6 +71,16 @@ def ensure_trade_tables(conn: sqlite3.Connection) -> None:
     conn.executescript(TRADE_SCHEMA_SQL)
     conn.commit()
 
+def get_channel_owner(db_path, channel_id: int) -> Optional[int]:
+    """Look up which user owns a trade channel by channel_id."""
+    from Core.db import db_session
+    with db_session(db_path) as conn:
+        row = conn.execute(
+            "SELECT user_id FROM trade_user_channels WHERE channel_id = ?",
+            (str(channel_id),)
+        ).fetchone()
+        return int(row["user_id"]) if row else None
+
 def get_trade_channel_id(conn, guild_id:int, user_id:int)->Optional[int]:
     row=conn.execute("SELECT channel_id FROM trade_user_channels WHERE guild_id=? AND user_id=?",(str(guild_id),str(user_id))).fetchone()
     return int(row["channel_id"]) if row else None

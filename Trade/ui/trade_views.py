@@ -45,9 +45,24 @@ def _search_guild_members(guild: discord.Guild, query: str, exclude_user_id: int
 class OwnerOnlyMixin:
     user_id: int
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.user_id:
+        # If user_id is set, use it directly
+        expected = getattr(self, "user_id", 0)
+        if expected and interaction.user.id != expected:
             await interaction.response.send_message("This is not your trade channel.", ephemeral=True)
             return False
+        # If user_id is 0/None (after restart), look up from DB by channel
+        if not expected and interaction.channel:
+            try:
+                from Trade.db.trade_db import get_channel_owner
+                db_path = _get_db_path()
+                owner_id = get_channel_owner(db_path, interaction.channel.id)
+                if owner_id and interaction.user.id != owner_id:
+                    await interaction.response.send_message("This is not your trade channel.", ephemeral=True)
+                    return False
+                # Restore user_id for future checks
+                self.user_id = owner_id or interaction.user.id
+            except Exception:
+                pass
         return True
 
 
