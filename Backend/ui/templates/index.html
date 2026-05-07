@@ -313,6 +313,9 @@ input[type=checkbox]{accent-color:var(--blue);width:14px;height:14px;cursor:poin
 
 
 
+    <input type="text" id="inv-search" placeholder="Search code or status…"
+      style="background:var(--s2);border:1px solid var(--border2);color:var(--text);padding:6px 12px;border-radius:7px;font-size:12px;outline:none;width:180px"
+      oninput="invFilter()">
     <button class="btn btn-ghost btn-sm" onclick="publishAll()">↑ Publish All to Catalog</button>
   </div>
 </div>
@@ -355,10 +358,19 @@ input[type=checkbox]{accent-color:var(--blue);width:14px;height:14px;cursor:poin
 
   <div class="table-wrap">
     <table>
-      <thead><tr><th style="width:56px"></th><th>Code</th><th>Status</th><th>Uploaded</th><th>Updated</th><th style="text-align:right">Actions</th></tr></thead>
+      <thead><tr><th style="width:56px"></th>
+        <th class="sortable" onclick="invSort('code')" style="cursor:pointer;user-select:none">Code <span id="inv-sort-code">↑</span></th>
+        <th class="sortable" onclick="invSort('status')" style="cursor:pointer;user-select:none">Status <span id="inv-sort-status"></span></th>
+        <th>Uploaded</th>
+        <th class="sortable" onclick="invSort('updated')" style="cursor:pointer;user-select:none">Updated <span id="inv-sort-updated"></span></th>
+        <th style="text-align:right">Actions</th>
+      </tr></thead>
       <tbody id="inventory-tbody">
       {% for item in items %}
-      <tr id="row-{{ item.item_code }}">
+      <tr id="row-{{ item.item_code }}"
+        data-code="{{ item.item_code }}"
+        data-status="{{ item.status }}"
+        data-updated="{{ item.updated_at or '' }}">
         <td>
           {% if item.preview_url %}
           <img class="thumb" src="{{ item.preview_url }}" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
@@ -1241,6 +1253,34 @@ async function postSummary(rating) {
 }
 
 let _claimSortCol = 'date', _claimSortAsc = false;
+
+function invFilter() {
+  const q = document.getElementById('inv-search').value.toLowerCase();
+  const rows = document.querySelectorAll('#inventory-tbody tr');
+  rows.forEach(r => {
+    const code = (r.dataset.code || '').toLowerCase();
+    const status = (r.dataset.status || '').toLowerCase();
+    r.style.display = (!q || code.includes(q) || status.includes(q)) ? '' : 'none';
+  });
+}
+
+let _invSortCol = 'code', _invSortAsc = true;
+function invSort(col) {
+  if (_invSortCol === col) { _invSortAsc = !_invSortAsc; }
+  else { _invSortCol = col; _invSortAsc = true; }
+  ['code','status','updated'].forEach(c => {
+    const el = document.getElementById('inv-sort-' + c);
+    if (el) el.textContent = c === col ? (_invSortAsc ? '↑' : '↓') : '';
+  });
+  const tbody = document.getElementById('inventory-tbody');
+  const rows = Array.from(tbody.querySelectorAll('tr'));
+  rows.sort((a, b) => {
+    const av = (a.dataset[col] || '').toLowerCase();
+    const bv = (b.dataset[col] || '').toLowerCase();
+    return _invSortAsc ? av.localeCompare(bv) : bv.localeCompare(av);
+  });
+  rows.forEach(r => tbody.appendChild(r));
+}
 
 function claimsFilter() {
   const q    = (document.getElementById('claims-search')?.value || '').toLowerCase().trim();
