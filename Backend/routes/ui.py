@@ -413,14 +413,42 @@ def ui_binshow_log():
 
 
 @router.delete("/ui/binshow/log/{auction_id}")
-def ui_binshow_log_delete(auction_id: int):
-    """Remove a row from the auction log (wrong number typed)."""
-    from Core.bin_queue import delete_auction_log_entry, restamp_auction_claim_numbers
+def ui_binshow_log_delete(auction_id: int, remove_claim: bool = False, refund: bool = False):
+    """
+    Remove a row from the auction log.
+    remove_claim=true: also removes the claim on the associated item (no refund for bin shows).
+    """
+    from Core.bin_queue import delete_auction_log_entry, restamp_auction_claim_numbers, get_auction_entry
     active = require_active_show()
+
+    claim_removed = False
+    claim_error   = None
+
+    if remove_claim:
+        row = get_auction_entry(auction_id)
+        if row and row.get("card_number") and row.get("claimed"):
+            item_code = f"N{int(row['card_number']):03d}"
+            try:
+                from Core.claim_service import remove_claim as rc
+                rc(active.db_path, item_code, refund=False, reason="Bin log row deleted")
+                claim_removed = True
+            except Exception as e:
+                claim_error = str(e)
+
     deleted = delete_auction_log_entry(auction_id)
     if deleted:
         restamp_auction_claim_numbers(active.db_path)
-    return {"ok": True, "deleted": deleted}
+
+    return {"ok": True, "deleted": deleted, "claim_removed": claim_removed, "claim_error": claim_error}
+
+
+@router.post("/ui/binshow/log/insert")
+def ui_binshow_log_insert(after_id: int = Form(None)):
+    """Insert a placeholder row (other sale / cancellation) after the given auction id."""
+    from Core.bin_queue import insert_placeholder
+    active = require_active_show()
+    new_id = insert_placeholder(after_id=after_id, show_db_path=active.db_path)
+    return {"ok": True, "inserted_id": new_id}
 
 
 @router.post("/ui/binshow/log/{auction_id}/assign")

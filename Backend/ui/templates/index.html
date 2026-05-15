@@ -243,6 +243,14 @@ input[type=checkbox]{accent-color:var(--blue);width:14px;height:14px;cursor:poin
 #toast.show{opacity:1;transform:translateY(0)}
 #toast.ok{border-color:rgba(52,212,116,.4);color:var(--green)}
 #toast.err{border-color:rgba(240,84,79,.4);color:var(--red)}
+
+  /* Bin Manager — insert skip row */
+  .bs-insert-row td { padding: 0; transition: height 0.15s; }
+  .bs-insert-zone { display:flex; justify-content:flex-end; opacity:0; height:0; transition: opacity 0.15s; padding:0 8px; }
+  tr:hover + .bs-insert-row .bs-insert-zone,
+  .bs-insert-row:hover .bs-insert-zone { opacity:1; height:28px; }
+  .bs-insert-btn { background:rgba(124,106,255,0.12); border:1px dashed rgba(124,106,255,0.4); color:rgba(124,106,255,0.9); border-radius:6px; font-size:11px; padding:3px 10px; cursor:pointer; }
+  .bs-insert-btn:hover { background:rgba(124,106,255,0.25); }
 </style>
 </head>
 <body>
@@ -619,6 +627,7 @@ input[type=checkbox]{accent-color:var(--blue);width:14px;height:14px;cursor:poin
   </div>
   <div style="display:flex;gap:8px">
     <button class="btn btn-ghost btn-sm" onclick="loadBinLog()">↺ Refresh</button>
+    <button class="btn btn-ghost btn-sm" onclick="bsInsertPlaceholder(null)">+ Insert at Top</button>
     <button class="btn btn-red btn-sm" onclick="clearBinLog()">🗑 Clear Log</button>
   </div>
 </div>
@@ -1918,6 +1927,18 @@ function renderBinLog(rows) {
         </td>`;
       tbody.appendChild(tr);
       bsLoadPreview(row.id, code);
+
+      // Add insert-skip row below (shown on hover)
+      if (!document.getElementById('bsi-row-' + row.id)) {
+        const insertTr = document.createElement('tr');
+        insertTr.id = 'bsi-row-' + row.id;
+        insertTr.className = 'bs-insert-row';
+        insertTr.innerHTML = `<td colspan="7" style="padding:0;height:0;overflow:hidden">
+          <div class="bs-insert-zone">
+            <button class="btn btn-ghost btn-xs bs-insert-btn" onclick="bsInsertPlaceholder(${row.id})" title="Insert other sale / cancellation here">+ Insert Skip</button>
+          </div></td>`;
+        tbody.appendChild(insertTr);
+      }
     }
     if (row.claimed && row.discord_name) {
       const input    = document.getElementById('bsi-' + row.id);
@@ -1994,14 +2015,53 @@ async function bsSubmit(id) {
 }
 
 async function bsDelete(id) {
+  // Check if the row is assigned
+  const statusEl = document.getElementById('bss-' + id);
+  const isAssigned = statusEl && statusEl.dataset.set === '1';
+  const codeEl = document.getElementById('bsr-' + id)?.querySelector('td:nth-child(2)');
+  const itemCode = codeEl ? codeEl.textContent.trim() : '';
+
+  let removeClaim = false;
+  if (isAssigned && itemCode) {
+    const confirmed = confirm(
+      'This row is assigned (' + itemCode + ').\n\n' +
+      'OK = Remove row AND claim\n' +
+      'Cancel = Abort'
+    );
+    if (!confirmed) return;
+    removeClaim = true;
+  } else {
+    if (!confirm('Remove this row? Auction numbers will be restamped.')) return;
+  }
+
   try {
-    const d=await fetch('/ui/binshow/log/'+id,{method:'DELETE'}).then(r=>r.json());
+    const url = '/ui/binshow/log/' + id + '?remove_claim=' + removeClaim + '&refund=false';
+    const d = await fetch(url, {method:'DELETE'}).then(r=>r.json());
     if (d.ok) {
-      document.getElementById('bsr-'+id)?.remove();
+      document.getElementById('bsr-' + id)?.remove();
+      // Also remove the insert row below it
+      document.getElementById('bsi-row-' + id)?.remove();
+      // Renumber remaining rows
       document.querySelectorAll('#binshow-body tr[id^="bsr-"]').forEach((tr,idx)=>{
         const first=tr.querySelector('td'); if(first) first.textContent='#'+(idx+1);
       });
-      toast('Row removed');
+      if (removeClaim && d.claim_removed) toast('Row removed. Claim on ' + itemCode + ' cleared.');
+      else if (removeClaim && d.claim_error) toast('Row removed but claim error: ' + d.claim_error, 'warn');
+      else toast('Row removed');
+    }
+  } catch(e) { toast('Network error','err'); }
+}
+
+async function bsInsertPlaceholder(afterId) {
+  try {
+    const fd = new FormData();
+    if (afterId !== null) fd.append('after_id', afterId);
+    const d = await fetch('/ui/binshow/log/insert', {method:'POST', body:fd}).then(r=>r.json());
+    if (d.ok) {
+      toast('Skip inserted. Auction numbers restamped.');
+      await loadBinLog();
+    } else {
+      toast(d.error || 'Insert failed', 'err');
     }
   } catch(e) { toast('Network error','err'); }
 }

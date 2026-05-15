@@ -194,6 +194,57 @@ def delete_auction_log_entry(auction_id: int) -> bool:
         conn.close()
 
 
+def insert_placeholder(after_id, show_db_path=None) -> int:
+    """
+    Insert a blank placeholder row (other sale / cancellation) after the given id.
+    after_id=None inserts at the beginning (before all rows).
+    Restamps auction_number on all bin claims in the show DB if show_db_path given.
+    Returns the new row id.
+    """
+    from datetime import timedelta
+    conn = _connect()
+    try:
+        if after_id is None:
+            # Insert before everything - use earliest created_at minus 1ms
+            first = conn.execute(
+                "SELECT created_at FROM auction_log ORDER BY id ASC LIMIT 1"
+            ).fetchone()
+            if first:
+                try:
+                    ts = datetime.fromisoformat(first["created_at"])
+                except Exception:
+                    ts = datetime.strptime(first["created_at"][:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+                new_ts = (ts - timedelta(milliseconds=1)).isoformat()
+            else:
+                new_ts = datetime.now(timezone.utc).isoformat()
+        else:
+            target = conn.execute(
+                "SELECT created_at FROM auction_log WHERE id = ?", (after_id,)
+            ).fetchone()
+            if not target:
+                raise ValueError(f"Auction log entry {after_id} not found.")
+            try:
+                ts = datetime.fromisoformat(target["created_at"])
+            except Exception:
+                ts = datetime.strptime(target["created_at"][:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+            new_ts = (ts + timedelta(milliseconds=1)).isoformat()
+
+        cur = conn.execute(
+            "INSERT INTO auction_log (card_number, winner_name, discord_name, claimed, created_at) "
+            "VALUES (0, '[placeholder]', NULL, 0, ?)",
+            (new_ts,),
+        )
+        conn.commit()
+        new_id = cur.lastrowid
+    finally:
+        conn.close()
+
+    if show_db_path:
+        restamp_auction_claim_numbers(show_db_path)
+
+    return new_id
+
+
 def restamp_auction_claim_numbers(show_db_path) -> None:
     from Core.db import db_session
     rows = get_auction_log()
