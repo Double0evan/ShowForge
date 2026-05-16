@@ -451,6 +451,14 @@ def ui_binshow_log_insert(after_id: int = Form(None)):
     return {"ok": True, "inserted_id": new_id}
 
 
+@router.post("/ui/binshow/log/{auction_id}/label")
+def ui_binshow_log_label(auction_id: int, label: str = Form(...)):
+    """Update the label/description on a placeholder row."""
+    from Core.bin_queue import update_placeholder_label
+    updated = update_placeholder_label(auction_id, label)
+    return {"ok": updated}
+
+
 @router.post("/ui/binshow/log/{auction_id}/assign")
 def ui_binshow_log_assign(
     auction_id: int,

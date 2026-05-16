@@ -245,6 +245,20 @@ def insert_placeholder(after_id, show_db_path=None) -> int:
     return new_id
 
 
+def update_placeholder_label(auction_id: int, label: str) -> bool:
+    """Update the winner_name field on a placeholder row to store a descriptive label."""
+    conn = _connect()
+    try:
+        cur = conn.execute(
+            "UPDATE auction_log SET winner_name = ? WHERE id = ? AND card_number = 0",
+            (label, auction_id)
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
 def restamp_auction_claim_numbers(show_db_path) -> None:
     from Core.db import db_session
     rows = get_auction_log()

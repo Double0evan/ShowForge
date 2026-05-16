@@ -1904,29 +1904,61 @@ function renderBinLog(rows) {
     tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--dim);padding:40px;font-style:italic">Waiting for host to type numbers in Discord...</td></tr>';
     return;
   }
-  const existing = new Set([...tbody.querySelectorAll('tr[id^="bsr-"]')].map(r => r.id));
+  // Full re-render to respect server-side ordering (handles inserts between rows)
+  tbody.innerHTML = '';
   rows.forEach((row, idx) => {
     const auctionNum = idx + 1;
     const rowId = 'bsr-' + row.id;
-    const code  = 'N' + String(row.card_number).padStart(3, '0');
-    if (!existing.has(rowId)) {
+    const isPlaceholder = row.card_number === 0 || row.winner_name === '[placeholder]';
+    const code  = isPlaceholder ? '—' : 'N' + String(row.card_number).padStart(3, '0');
+    if (true) {
       const tr = document.createElement('tr');
       tr.id = rowId;
-      tr.innerHTML = `
-        <td style="font-family:var(--mono);font-size:13px;color:var(--dim);text-align:center">#${auctionNum}</td>
-        <td style="font-family:var(--mono);font-size:13px;font-weight:600">${code}</td>
-        <td><div id="bsp-${row.id}" style="width:56px;height:56px;border-radius:6px;background:var(--s3);overflow:hidden;display:flex;align-items:center;justify-content:center;color:var(--dim);font-size:10px">—</div></td>
-        <td><input id="bsi-${row.id}" type="text" placeholder="paste winner name..."
-          style="width:100%;background:var(--s3);border:1px solid var(--border2);border-radius:6px;padding:6px 10px;color:var(--text);font-family:var(--mono);font-size:13px"
-          onkeydown="bsKeydown(event,${row.id})" oninput="bsInput(event,${row.id})"></td>
-        <td id="bsm-${row.id}" style="font-size:12px;color:var(--dim)">—</td>
-        <td id="bss-${row.id}" style="font-size:12px">—</td>
-        <td style="display:flex;gap:4px">
-          <button class="btn btn-red btn-xs" onclick="bsDelete(${row.id})" title="Remove wrong entry">✕</button>
-          <button class="btn btn-ghost btn-xs" onclick="bsOverride(${row.id})" title="Override name">↺</button>
-        </td>`;
+      if (isPlaceholder) {
+        tr.style.opacity = '0.55';
+        const currentLabel = (row.winner_name && row.winner_name !== '[placeholder]') ? row.winner_name : '';
+        tr.innerHTML = `
+          <td style="font-family:var(--mono);font-size:13px;color:var(--dim);text-align:center">#${auctionNum}</td>
+          <td style="font-size:12px;color:var(--dim);font-style:italic">— skipped —</td>
+          <td colspan="3">
+            <div style="display:flex;gap:6px;align-items:center">
+              <select id="bslabel-${row.id}" onchange="bsUpdateLabel(${row.id})"
+                style="background:var(--s3);border:1px solid var(--border2);border-radius:6px;padding:4px 8px;color:var(--text);font-size:12px;max-width:160px">
+                <option value="">— label —</option>
+                <option value="Cancellation" ${currentLabel==='Cancellation'?'selected':''}>Cancellation</option>
+                <option value="Donation" ${currentLabel==='Donation'?'selected':''}>Donation</option>
+                <option value="Other Sale" ${currentLabel==='Other Sale'?'selected':''}>Other Sale</option>
+                <option value="custom" ${currentLabel&&!['Cancellation','Donation','Other Sale'].includes(currentLabel)?'selected':''}>Other...</option>
+              </select>
+              <input id="bslabeltext-${row.id}" type="text"
+                value="${currentLabel&&!['Cancellation','Donation','Other Sale'].includes(currentLabel)?currentLabel:''}"
+                placeholder="describe..."
+                style="display:${currentLabel&&!['Cancellation','Donation','Other Sale'].includes(currentLabel)?'block':'none'};background:var(--s3);border:1px solid var(--border2);border-radius:6px;padding:4px 8px;color:var(--text);font-size:12px;width:140px"
+                onblur="bsSaveCustomLabel(${row.id})"
+                onkeydown="if(event.key==='Enter')bsSaveCustomLabel(${row.id})">
+            </div>
+          </td>
+          <td></td>
+          <td style="display:flex;gap:4px">
+            <button class="btn btn-red btn-xs" onclick="bsDelete(${row.id})" title="Remove placeholder">✕</button>
+          </td>`;
+      } else {
+        tr.innerHTML = `
+          <td style="font-family:var(--mono);font-size:13px;color:var(--dim);text-align:center">#${auctionNum}</td>
+          <td style="font-family:var(--mono);font-size:13px;font-weight:600">${code}</td>
+          <td><div id="bsp-${row.id}" style="width:56px;height:56px;border-radius:6px;background:var(--s3);overflow:hidden;display:flex;align-items:center;justify-content:center;color:var(--dim);font-size:10px">—</div></td>
+          <td><input id="bsi-${row.id}" type="text" placeholder="paste winner name..."
+            style="width:100%;background:var(--s3);border:1px solid var(--border2);border-radius:6px;padding:6px 10px;color:var(--text);font-family:var(--mono);font-size:13px"
+            onkeydown="bsKeydown(event,${row.id})" oninput="bsInput(event,${row.id})"></td>
+          <td id="bsm-${row.id}" style="font-size:12px;color:var(--dim)">—</td>
+          <td id="bss-${row.id}" style="font-size:12px">—</td>
+          <td style="display:flex;gap:4px">
+            <button class="btn btn-red btn-xs" onclick="bsDelete(${row.id})" title="Remove wrong entry">✕</button>
+            <button class="btn btn-ghost btn-xs" onclick="bsOverride(${row.id})" title="Override name">↺</button>
+          </td>`;
+        bsLoadPreview(row.id, code);
+      }
       tbody.appendChild(tr);
-      bsLoadPreview(row.id, code);
 
       // Add insert-skip row below (shown on hover)
       if (!document.getElementById('bsi-row-' + row.id)) {
@@ -1947,9 +1979,9 @@ function renderBinLog(rows) {
       if (input && !input.disabled) { input.value = row.winner_name||''; input.disabled=true; input.style.opacity='0.5'; }
       if (statusEl && !statusEl.dataset.set) { statusEl.innerHTML='<span style="color:var(--green)">✅ Assigned</span>'; statusEl.dataset.set='1'; }
       if (matchEl && !matchEl.dataset.set) { matchEl.innerHTML=`<span style="color:var(--green);font-family:var(--mono)">${escHtml(row.discord_name)}</span>`; matchEl.dataset.set='1'; }
-    }
   });
-  const inputs = tbody.querySelectorAll('input:not([disabled])');
+  // Focus first real (non-placeholder) unassigned input
+  const inputs = [...tbody.querySelectorAll('input:not([disabled])')].filter(el => el.id.startsWith('bsi-'));
   if (inputs.length && document.activeElement?.tagName !== 'INPUT') inputs[0].focus();
 }
 
@@ -2050,6 +2082,32 @@ async function bsDelete(id) {
       else toast('Row removed');
     }
   } catch(e) { toast('Network error','err'); }
+}
+
+async function bsUpdateLabel(id) {
+  const sel = document.getElementById('bslabel-' + id);
+  const textInput = document.getElementById('bslabeltext-' + id);
+  if (sel.value === 'custom') {
+    textInput.style.display = 'block';
+    textInput.focus();
+  } else {
+    textInput.style.display = 'none';
+    if (sel.value) await bsSaveLabel(id, sel.value);
+  }
+}
+
+async function bsSaveCustomLabel(id) {
+  const textInput = document.getElementById('bslabeltext-' + id);
+  const val = textInput.value.trim();
+  if (val) await bsSaveLabel(id, val);
+}
+
+async function bsSaveLabel(id, label) {
+  try {
+    const fd = new FormData();
+    fd.append('label', label);
+    await fetch('/ui/binshow/log/' + id + '/label', {method:'POST', body:fd});
+  } catch(e) { /* silent */ }
 }
 
 async function bsInsertPlaceholder(afterId) {
