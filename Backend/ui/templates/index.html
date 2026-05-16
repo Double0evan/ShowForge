@@ -251,6 +251,7 @@ input[type=checkbox]{accent-color:var(--blue);width:14px;height:14px;cursor:poin
   .bs-insert-row:hover .bs-insert-zone { opacity:1; height:28px; }
   .bs-insert-btn { background:rgba(124,106,255,0.12); border:1px dashed rgba(124,106,255,0.4); color:rgba(124,106,255,0.9); border-radius:6px; font-size:11px; padding:3px 10px; cursor:pointer; }
   .bs-insert-btn:hover { background:rgba(124,106,255,0.25); }
+  tr.shift-highlight td { background: rgba(255,200,0,0.08) !important; outline: 1px solid rgba(255,200,0,0.3); }
 </style>
 </head>
 <body>
@@ -1952,7 +1953,9 @@ function renderBinLog(rows) {
             onkeydown="bsKeydown(event,${row.id})" oninput="bsInput(event,${row.id})"></td>
           <td id="bsm-${row.id}" style="font-size:12px;color:var(--dim)">—</td>
           <td id="bss-${row.id}" style="font-size:12px">—</td>
-          <td style="display:flex;gap:4px">
+          <td style="display:flex;gap:4px;flex-wrap:wrap">
+            <button class="btn btn-ghost btn-xs" onclick="bsShiftNames(${row.id}, 'down')" title="Shift all names down from here">↓</button>
+            <button class="btn btn-ghost btn-xs" onclick="bsShiftNames(${row.id}, 'up')" title="Shift all names up from here">↑</button>
             <button class="btn btn-red btn-xs" onclick="bsDelete(${row.id})" title="Remove wrong entry">✕</button>
             <button class="btn btn-ghost btn-xs" onclick="bsOverride(${row.id})" title="Override name">↺</button>
           </td>`;
@@ -1980,9 +1983,7 @@ function renderBinLog(rows) {
       if (statusEl && !statusEl.dataset.set) { statusEl.innerHTML='<span style="color:var(--green)">✅ Assigned</span>'; statusEl.dataset.set='1'; }
       if (matchEl && !matchEl.dataset.set) { matchEl.innerHTML=`<span style="color:var(--green);font-family:var(--mono)">${escHtml(row.discord_name)}</span>`; matchEl.dataset.set='1'; }
   });
-  // Focus first real (non-placeholder) unassigned input
-  const inputs = [...tbody.querySelectorAll('input:not([disabled])')].filter(el => el.id.startsWith('bsi-'));
-  if (inputs.length && document.activeElement?.tagName !== 'INPUT') inputs[0].focus();
+  // Don't auto-focus — prevents scroll jumping during live show
 }
 
 let _bsFuzzyTimer = {};
@@ -2108,6 +2109,59 @@ async function bsSaveLabel(id, label) {
     fd.append('label', label);
     await fetch('/ui/binshow/log/' + id + '/label', {method:'POST', body:fd});
   } catch(e) { /* silent */ }
+}
+
+// Shift state — tracks pending shift operation
+let _shiftPending = null; // {fromId, direction}
+
+function bsShiftNames(fromId, direction) {
+  if (_shiftPending) {
+    // This is the END row click — execute the shift between pending and this row
+    const startId = _shiftPending.fromId;
+    const dir     = _shiftPending.direction;
+    _shiftPending = null;
+
+    // Clear highlight
+    document.querySelectorAll('#binshow-body tr.shift-highlight').forEach(tr => tr.classList.remove('shift-highlight'));
+
+    // Get all real rows (with inputs) in DOM order
+    const allRows = [...document.querySelectorAll('#binshow-body tr[id^="bsr-"]')]
+      .filter(tr => tr.querySelector('input[id^="bsi-"]'));
+
+    const startIdx = allRows.findIndex(tr => tr.id === 'bsr-' + startId);
+    const endIdx   = allRows.findIndex(tr => tr.id === 'bsr-' + fromId);
+
+    if (startIdx === -1 || endIdx === -1) return;
+    const lo = Math.min(startIdx, endIdx);
+    const hi = Math.max(startIdx, endIdx);
+
+    const slice = allRows.slice(lo, hi + 1);
+    const names = slice.map(tr => tr.querySelector('input[id^="bsi-"]').value);
+
+    if (dir === 'down') {
+      names.unshift('');
+      names.pop();
+    } else {
+      names.shift();
+      names.push('');
+    }
+
+    slice.forEach((tr, i) => {
+      tr.querySelector('input[id^="bsi-"]').value = names[i];
+    });
+
+    toast('Names shifted. Press Enter on each row to save.');
+    return;
+  }
+
+  // This is the START row click — highlight and wait for end row
+  _shiftPending = { fromId, direction };
+
+  // Highlight the start row
+  const startTr = document.getElementById('bsr-' + fromId);
+  if (startTr) startTr.classList.add('shift-highlight');
+
+  toast('Now click the ↓ or ↑ button on the END row to complete the shift.');
 }
 
 async function bsInsertPlaceholder(afterId) {
