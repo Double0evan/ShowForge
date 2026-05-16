@@ -1561,8 +1561,7 @@ let _acCodes = [];   // ['N001','S002',...]
 
   } catch {
     // fallback: scrape names already rendered on the users page if context endpoint missing
-    try { _acUsers = JSON.parse({{ users | map(attribute='display_name') | list | tojson | tojson if users else "'[]'" }}); } catch(e) { _acUsers = []; }
-    try { _acCodes = JSON.parse({{ items | map(attribute='item_code') | list | tojson | tojson if items else "'[]'" }}); } catch(e) { _acCodes = []; }
+    // Fallback removed — loaded via /ui/console/context fetch above
   }
 })();
 
