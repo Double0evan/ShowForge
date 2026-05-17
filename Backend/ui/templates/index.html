@@ -1905,13 +1905,23 @@ function renderBinLog(rows) {
     tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--dim);padding:40px;font-style:italic">Waiting for host to type numbers in Discord...</td></tr>';
     return;
   }
-  // Full re-render to respect server-side ordering (handles inserts between rows)
-  tbody.innerHTML = '';
+  // Smart re-render: full rebuild only when row count or order changes
+  const existingIds = [...tbody.querySelectorAll('tr[id^="bsr-"]')].map(r => r.id.replace('bsr-',''));
+  const newIds = rows.map(r => String(r.id));
+  const orderChanged = existingIds.join(',') !== newIds.join(',');
+  if (orderChanged) tbody.innerHTML = '';
+  const existing = new Set(orderChanged ? [] : existingIds.map(id => 'bsr-' + id));
   rows.forEach((row, idx) => {
     const auctionNum = idx + 1;
     const rowId = 'bsr-' + row.id;
     const isPlaceholder = row.card_number === 0 || row.winner_name === '[placeholder]';
     const code  = isPlaceholder ? '—' : 'N' + String(row.card_number).padStart(3, '0');
+    // Update auction number on existing rows
+    if (existing.has(rowId)) {
+      const tr = document.getElementById(rowId);
+      if (tr) { const first = tr.querySelector('td'); if (first) first.textContent = '#' + auctionNum; }
+      return;
+    }
     if (true) {
       const tr = document.createElement('tr');
       tr.id = rowId;
@@ -1982,7 +1992,6 @@ function renderBinLog(rows) {
       if (input && !input.disabled) { input.value = row.winner_name||''; input.disabled=true; input.style.opacity='0.5'; }
       if (statusEl && !statusEl.dataset.set) { statusEl.innerHTML='<span style="color:var(--green)">✅ Assigned</span>'; statusEl.dataset.set='1'; }
       if (matchEl && !matchEl.dataset.set) { matchEl.innerHTML=`<span style="color:var(--green);font-family:var(--mono)">${escHtml(row.discord_name)}</span>`; matchEl.dataset.set='1'; }
-    }
   });
   // Don't auto-focus — prevents scroll jumping during live show
 }
