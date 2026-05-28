@@ -201,6 +201,7 @@ def list_claims(db_path: Path, include_removed: bool = False) -> list[dict]:
               c.id, c.item_code, c.user_id,
               u.display_name AS user_display_name,
               c.source, c.reaction_message_id, c.reaction_emoji,
+              c.auction_number,
               c.created_at, c.removed_at, c.removed_reason
             FROM claims c
             JOIN users u ON u.id = c.user_id

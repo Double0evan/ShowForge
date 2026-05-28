@@ -101,6 +101,20 @@ def confirm_sale(row_id: int) -> bool:
         conn.close()
 
 
+def list_pending_sales(limit: int = 25, unmatched_only: bool = True) -> list[dict]:
+    """Return recent pending sales for the React Bin Manager without consuming them."""
+    conn = _connect()
+    try:
+        where = "WHERE matched = 0" if unmatched_only else ""
+        rows = conn.execute(
+            f"SELECT * FROM pending_sales {where} ORDER BY detected_at DESC LIMIT ?",
+            (int(limit),),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
 def clear_queue() -> int:
     """Clear all unmatched pending sales. Returns count cleared."""
     conn = _connect()
@@ -192,71 +206,64 @@ def delete_auction_log_entry(auction_id: int) -> bool:
         return cur.rowcount > 0
     finally:
         conn.close()
-
-
-def insert_placeholder(after_id, show_db_path=None) -> int:
+        
+def insert_placeholder(after_id: int | None, show_db_path=None) -> int:
     """
-    Insert a blank placeholder row (other sale / cancellation) after the given id.
-    after_id=None inserts at the beginning (before all rows).
-    Restamps auction_number on all bin claims in the show DB if show_db_path given.
-    Returns the new row id.
+    Insert a blank placeholder row (other sale / cancellation).
+    - after_id: insert AFTER this auction_log id. None = insert at the beginning.
+    - Restamps auction_number on all bin claims in the show DB if show_db_path given.
+    Returns the new row's id.
     """
-    from datetime import timedelta
     conn = _connect()
     try:
         if after_id is None:
-            # Insert before everything - use earliest created_at minus 1ms
-            first = conn.execute(
-                "SELECT created_at FROM auction_log ORDER BY id ASC LIMIT 1"
-            ).fetchone()
-            if first:
-                try:
-                    ts = datetime.fromisoformat(first["created_at"])
-                except Exception:
-                    ts = datetime.strptime(first["created_at"][:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
-                new_ts = (ts - timedelta(milliseconds=1)).isoformat()
-            else:
-                new_ts = datetime.now(timezone.utc).isoformat()
+            # Insert before everything — give it the smallest possible rowid by
+            # just inserting; ORDER BY id handles position via ROW_NUMBER()
+            cur = conn.execute(
+                "INSERT INTO auction_log (card_number, winner_name, discord_name, claimed, created_at) "
+                "VALUES (0, '[placeholder]', NULL, 0, ?)",
+                (datetime.now(timezone.utc).isoformat(),),
+            )
         else:
+            # We want the new row to sort between after_id and the next row.
+            # SQLite AUTOINCREMENT always gives a higher id than existing rows,
+            # so we can't insert "between" by id alone.
+            # Strategy: use a fractional created_at trick isn't reliable.
+            # Better: renumber by recreating order — insert with a created_at
+            # that is 1ms after the target row's created_at.
             target = conn.execute(
                 "SELECT created_at FROM auction_log WHERE id = ?", (after_id,)
             ).fetchone()
             if not target:
                 raise ValueError(f"Auction log entry {after_id} not found.")
+
+            # Parse the timestamp and add 1 millisecond
+            from datetime import timedelta
+            ts_str = target["created_at"]
+            # Handle both with and without timezone
             try:
-                ts = datetime.fromisoformat(target["created_at"])
+                ts = datetime.fromisoformat(ts_str)
             except Exception:
-                ts = datetime.strptime(target["created_at"][:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+                ts = datetime.strptime(ts_str[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+
             new_ts = (ts + timedelta(milliseconds=1)).isoformat()
 
-        cur = conn.execute(
-            "INSERT INTO auction_log (card_number, winner_name, discord_name, claimed, created_at) "
-            "VALUES (0, '[placeholder]', NULL, 0, ?)",
-            (new_ts,),
-        )
+            cur = conn.execute(
+                "INSERT INTO auction_log (card_number, winner_name, discord_name, claimed, created_at) "
+                "VALUES (0, '[placeholder]', NULL, 0, ?)",
+                (new_ts,),
+            )
+
         conn.commit()
         new_id = cur.lastrowid
     finally:
         conn.close()
 
+    # Restamp claim auction_numbers to reflect new positions
     if show_db_path:
         restamp_auction_claim_numbers(show_db_path)
 
     return new_id
-
-
-def update_placeholder_label(auction_id: int, label: str) -> bool:
-    """Update the winner_name field on a placeholder row to store a descriptive label."""
-    conn = _connect()
-    try:
-        cur = conn.execute(
-            "UPDATE auction_log SET winner_name = ? WHERE id = ? AND card_number = 0",
-            (label, auction_id)
-        )
-        conn.commit()
-        return cur.rowcount > 0
-    finally:
-        conn.close()
 
 
 def restamp_auction_claim_numbers(show_db_path) -> None:

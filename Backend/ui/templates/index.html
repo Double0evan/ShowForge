@@ -243,15 +243,6 @@ input[type=checkbox]{accent-color:var(--blue);width:14px;height:14px;cursor:poin
 #toast.show{opacity:1;transform:translateY(0)}
 #toast.ok{border-color:rgba(52,212,116,.4);color:var(--green)}
 #toast.err{border-color:rgba(240,84,79,.4);color:var(--red)}
-
-  /* Bin Manager — insert skip row */
-  .bs-insert-row td { padding: 0; transition: height 0.15s; }
-  .bs-insert-zone { display:flex; justify-content:flex-end; opacity:0; height:0; transition: opacity 0.15s; padding:0 8px; }
-  tr:hover + .bs-insert-row .bs-insert-zone,
-  .bs-insert-row:hover .bs-insert-zone { opacity:1; height:28px; }
-  .bs-insert-btn { background:rgba(124,106,255,0.12); border:1px dashed rgba(124,106,255,0.4); color:rgba(124,106,255,0.9); border-radius:6px; font-size:11px; padding:3px 10px; cursor:pointer; }
-  .bs-insert-btn:hover { background:rgba(124,106,255,0.25); }
-  tr.shift-highlight td { background: rgba(255,200,0,0.08) !important; outline: 1px solid rgba(255,200,0,0.3); }
 </style>
 </head>
 <body>
@@ -628,7 +619,6 @@ input[type=checkbox]{accent-color:var(--blue);width:14px;height:14px;cursor:poin
   </div>
   <div style="display:flex;gap:8px">
     <button class="btn btn-ghost btn-sm" onclick="loadBinLog()">↺ Refresh</button>
-    <button class="btn btn-ghost btn-sm" onclick="bsInsertPlaceholder(null)">+ Insert at Top</button>
     <button class="btn btn-red btn-sm" onclick="clearBinLog()">🗑 Clear Log</button>
   </div>
 </div>
@@ -1561,8 +1551,8 @@ let _acCodes = [];   // ['N001','S002',...]
 
   } catch {
     // fallback: scrape names already rendered on the users page if context endpoint missing
-    try { _acUsers = JSON.parse({{ users | map(attribute='display_name') | list | tojson | tojson if users else "'[]'" }}); } catch(e) { _acUsers = []; }
-    try { _acCodes = JSON.parse({{ items | map(attribute='item_code') | list | tojson | tojson if items else "'[]'" }}); } catch(e) { _acCodes = []; }
+    _acUsers = {{ users | map(attribute='display_name') | list | tojson if users else '[]' }};
+    _acCodes = {{ items | map(attribute='item_code') | list | tojson if items else '[]' }};
   }
 })();
 
@@ -1905,85 +1895,29 @@ function renderBinLog(rows) {
     tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--dim);padding:40px;font-style:italic">Waiting for host to type numbers in Discord...</td></tr>';
     return;
   }
-  // Smart re-render: full rebuild only when row count or order changes
-  const existingIds = [...tbody.querySelectorAll('tr[id^="bsr-"]')].map(r => r.id.replace('bsr-',''));
-  const newIds = rows.map(r => String(r.id));
-  const orderChanged = existingIds.join(',') !== newIds.join(',');
-  if (orderChanged) tbody.innerHTML = '';
-  const existing = new Set(orderChanged ? [] : existingIds.map(id => 'bsr-' + id));
+  const existing = new Set([...tbody.querySelectorAll('tr[id^="bsr-"]')].map(r => r.id));
   rows.forEach((row, idx) => {
     const auctionNum = idx + 1;
     const rowId = 'bsr-' + row.id;
-    const isPlaceholder = row.card_number === 0 || row.winner_name === '[placeholder]';
-    const code  = isPlaceholder ? '—' : 'N' + String(row.card_number).padStart(3, '0');
-    // Update auction number on existing rows
-    if (existing.has(rowId)) {
-      const tr = document.getElementById(rowId);
-      if (tr) { const first = tr.querySelector('td'); if (first) first.textContent = '#' + auctionNum; }
-      return;
-    }
-    if (true) {
+    const code  = 'N' + String(row.card_number).padStart(3, '0');
+    if (!existing.has(rowId)) {
       const tr = document.createElement('tr');
       tr.id = rowId;
-      if (isPlaceholder) {
-        tr.style.opacity = '0.55';
-        const currentLabel = (row.winner_name && row.winner_name !== '[placeholder]') ? row.winner_name : '';
-        tr.innerHTML = `
-          <td style="font-family:var(--mono);font-size:13px;color:var(--dim);text-align:center">#${auctionNum}</td>
-          <td style="font-size:12px;color:var(--dim);font-style:italic">— skipped —</td>
-          <td colspan="3">
-            <div style="display:flex;gap:6px;align-items:center">
-              <select id="bslabel-${row.id}" onchange="bsUpdateLabel(${row.id})"
-                style="background:var(--s3);border:1px solid var(--border2);border-radius:6px;padding:4px 8px;color:var(--text);font-size:12px;max-width:160px">
-                <option value="">— label —</option>
-                <option value="Cancellation" ${currentLabel==='Cancellation'?'selected':''}>Cancellation</option>
-                <option value="Donation" ${currentLabel==='Donation'?'selected':''}>Donation</option>
-                <option value="Other Sale" ${currentLabel==='Other Sale'?'selected':''}>Other Sale</option>
-                <option value="custom" ${currentLabel&&!['Cancellation','Donation','Other Sale'].includes(currentLabel)?'selected':''}>Other...</option>
-              </select>
-              <input id="bslabeltext-${row.id}" type="text"
-                value="${currentLabel&&!['Cancellation','Donation','Other Sale'].includes(currentLabel)?currentLabel:''}"
-                placeholder="describe..."
-                style="display:${currentLabel&&!['Cancellation','Donation','Other Sale'].includes(currentLabel)?'block':'none'};background:var(--s3);border:1px solid var(--border2);border-radius:6px;padding:4px 8px;color:var(--text);font-size:12px;width:140px"
-                onblur="bsSaveCustomLabel(${row.id})"
-                onkeydown="if(event.key==='Enter')bsSaveCustomLabel(${row.id})">
-            </div>
-          </td>
-          <td></td>
-          <td style="display:flex;gap:4px">
-            <button class="btn btn-red btn-xs" onclick="bsDelete(${row.id})" title="Remove placeholder">✕</button>
-          </td>`;
-      } else {
-        tr.innerHTML = `
-          <td style="font-family:var(--mono);font-size:13px;color:var(--dim);text-align:center">#${auctionNum}</td>
-          <td style="font-family:var(--mono);font-size:13px;font-weight:600">${code}</td>
-          <td><div id="bsp-${row.id}" style="width:56px;height:56px;border-radius:6px;background:var(--s3);overflow:hidden;display:flex;align-items:center;justify-content:center;color:var(--dim);font-size:10px">—</div></td>
-          <td><input id="bsi-${row.id}" type="text" placeholder="paste winner name..."
-            style="width:100%;background:var(--s3);border:1px solid var(--border2);border-radius:6px;padding:6px 10px;color:var(--text);font-family:var(--mono);font-size:13px"
-            onkeydown="bsKeydown(event,${row.id})" oninput="bsInput(event,${row.id})"></td>
-          <td id="bsm-${row.id}" style="font-size:12px;color:var(--dim)">—</td>
-          <td id="bss-${row.id}" style="font-size:12px">—</td>
-          <td style="display:flex;gap:4px;flex-wrap:wrap">
-            <button class="btn btn-ghost btn-xs" onclick="bsShiftNames(${row.id}, 'down')" title="Shift all names down from here">↓</button>
-            <button class="btn btn-ghost btn-xs" onclick="bsShiftNames(${row.id}, 'up')" title="Shift all names up from here">↑</button>
-            <button class="btn btn-red btn-xs" onclick="bsDelete(${row.id})" title="Remove wrong entry">✕</button>
-            <button class="btn btn-ghost btn-xs" onclick="bsOverride(${row.id})" title="Override name">↺</button>
-          </td>`;
-        bsLoadPreview(row.id, code);
-      }
+      tr.innerHTML = `
+        <td style="font-family:var(--mono);font-size:13px;color:var(--dim);text-align:center">#${auctionNum}</td>
+        <td style="font-family:var(--mono);font-size:13px;font-weight:600">${code}</td>
+        <td><div id="bsp-${row.id}" style="width:56px;height:56px;border-radius:6px;background:var(--s3);overflow:hidden;display:flex;align-items:center;justify-content:center;color:var(--dim);font-size:10px">—</div></td>
+        <td><input id="bsi-${row.id}" type="text" placeholder="paste winner name..."
+          style="width:100%;background:var(--s3);border:1px solid var(--border2);border-radius:6px;padding:6px 10px;color:var(--text);font-family:var(--mono);font-size:13px"
+          onkeydown="bsKeydown(event,${row.id})" oninput="bsInput(event,${row.id})"></td>
+        <td id="bsm-${row.id}" style="font-size:12px;color:var(--dim)">—</td>
+        <td id="bss-${row.id}" style="font-size:12px">—</td>
+        <td style="display:flex;gap:4px">
+          <button class="btn btn-red btn-xs" onclick="bsDelete(${row.id})" title="Remove wrong entry">✕</button>
+          <button class="btn btn-ghost btn-xs" onclick="bsOverride(${row.id})" title="Override name">↺</button>
+        </td>`;
       tbody.appendChild(tr);
-
-      // Add insert-skip row below (shown on hover)
-      if (!document.getElementById('bsi-row-' + row.id)) {
-        const insertTr = document.createElement('tr');
-        insertTr.id = 'bsi-row-' + row.id;
-        insertTr.className = 'bs-insert-row';
-        insertTr.innerHTML = `<td colspan="7" style="padding:0;height:0;overflow:hidden">
-          <div class="bs-insert-zone">
-            <button class="btn btn-ghost btn-xs bs-insert-btn" onclick="bsInsertPlaceholder(${row.id})" title="Insert other sale / cancellation here">+ Insert Skip</button>
-          </div></td>`;
-        tbody.appendChild(insertTr);
-      }
+      bsLoadPreview(row.id, code);
     }
     if (row.claimed && row.discord_name) {
       const input    = document.getElementById('bsi-' + row.id);
@@ -1992,8 +1926,10 @@ function renderBinLog(rows) {
       if (input && !input.disabled) { input.value = row.winner_name||''; input.disabled=true; input.style.opacity='0.5'; }
       if (statusEl && !statusEl.dataset.set) { statusEl.innerHTML='<span style="color:var(--green)">✅ Assigned</span>'; statusEl.dataset.set='1'; }
       if (matchEl && !matchEl.dataset.set) { matchEl.innerHTML=`<span style="color:var(--green);font-family:var(--mono)">${escHtml(row.discord_name)}</span>`; matchEl.dataset.set='1'; }
+    }
   });
-  // Don't auto-focus — prevents scroll jumping during live show
+  const inputs = tbody.querySelectorAll('input:not([disabled])');
+  if (inputs.length && document.activeElement?.tagName !== 'INPUT') inputs[0].focus();
 }
 
 let _bsFuzzyTimer = {};
@@ -2058,132 +1994,14 @@ async function bsSubmit(id) {
 }
 
 async function bsDelete(id) {
-  // Check if the row is assigned
-  const statusEl = document.getElementById('bss-' + id);
-  const isAssigned = statusEl && statusEl.dataset.set === '1';
-  const codeEl = document.getElementById('bsr-' + id)?.querySelector('td:nth-child(2)');
-  const itemCode = codeEl ? codeEl.textContent.trim() : '';
-
-  let removeClaim = false;
-  if (isAssigned && itemCode) {
-    const confirmed = confirm(
-      'This row is assigned (' + itemCode + ').\n\n' +
-      'OK = Remove row AND claim\n' +
-      'Cancel = Abort'
-    );
-    if (!confirmed) return;
-    removeClaim = true;
-  } else {
-    if (!confirm('Remove this row? Auction numbers will be restamped.')) return;
-  }
-
   try {
-    const url = '/ui/binshow/log/' + id + '?remove_claim=' + removeClaim + '&refund=false';
-    const d = await fetch(url, {method:'DELETE'}).then(r=>r.json());
+    const d=await fetch('/ui/binshow/log/'+id,{method:'DELETE'}).then(r=>r.json());
     if (d.ok) {
-      document.getElementById('bsr-' + id)?.remove();
-      // Also remove the insert row below it
-      document.getElementById('bsi-row-' + id)?.remove();
-      // Renumber remaining rows
+      document.getElementById('bsr-'+id)?.remove();
       document.querySelectorAll('#binshow-body tr[id^="bsr-"]').forEach((tr,idx)=>{
         const first=tr.querySelector('td'); if(first) first.textContent='#'+(idx+1);
       });
-      if (removeClaim && d.claim_removed) toast('Row removed. Claim on ' + itemCode + ' cleared.');
-      else if (removeClaim && d.claim_error) toast('Row removed but claim error: ' + d.claim_error, 'warn');
-      else toast('Row removed');
-    }
-  } catch(e) { toast('Network error','err'); }
-}
-
-async function bsUpdateLabel(id) {
-  const sel = document.getElementById('bslabel-' + id);
-  const textInput = document.getElementById('bslabeltext-' + id);
-  if (sel.value === 'custom') {
-    textInput.style.display = 'block';
-    textInput.focus();
-  } else {
-    textInput.style.display = 'none';
-    if (sel.value) await bsSaveLabel(id, sel.value);
-  }
-}
-
-async function bsSaveCustomLabel(id) {
-  const textInput = document.getElementById('bslabeltext-' + id);
-  const val = textInput.value.trim();
-  if (val) await bsSaveLabel(id, val);
-}
-
-async function bsSaveLabel(id, label) {
-  try {
-    const fd = new FormData();
-    fd.append('label', label);
-    await fetch('/ui/binshow/log/' + id + '/label', {method:'POST', body:fd});
-  } catch(e) { /* silent */ }
-}
-
-// Shift state — tracks pending shift operation
-let _shiftPending = null; // {fromId, direction}
-
-function bsShiftNames(fromId, direction) {
-  if (_shiftPending) {
-    // This is the END row click — execute the shift between pending and this row
-    const startId = _shiftPending.fromId;
-    const dir     = _shiftPending.direction;
-    _shiftPending = null;
-
-    // Clear highlight
-    document.querySelectorAll('#binshow-body tr.shift-highlight').forEach(tr => tr.classList.remove('shift-highlight'));
-
-    // Get all real rows (with inputs) in DOM order
-    const allRows = [...document.querySelectorAll('#binshow-body tr[id^="bsr-"]')]
-      .filter(tr => tr.querySelector('input[id^="bsi-"]'));
-
-    const startIdx = allRows.findIndex(tr => tr.id === 'bsr-' + startId);
-    const endIdx   = allRows.findIndex(tr => tr.id === 'bsr-' + fromId);
-
-    if (startIdx === -1 || endIdx === -1) return;
-    const lo = Math.min(startIdx, endIdx);
-    const hi = Math.max(startIdx, endIdx);
-
-    const slice = allRows.slice(lo, hi + 1);
-    const names = slice.map(tr => tr.querySelector('input[id^="bsi-"]').value);
-
-    if (dir === 'down') {
-      names.unshift('');
-      names.pop();
-    } else {
-      names.shift();
-      names.push('');
-    }
-
-    slice.forEach((tr, i) => {
-      tr.querySelector('input[id^="bsi-"]').value = names[i];
-    });
-
-    toast('Names shifted. Press Enter on each row to save.');
-    return;
-  }
-
-  // This is the START row click — highlight and wait for end row
-  _shiftPending = { fromId, direction };
-
-  // Highlight the start row
-  const startTr = document.getElementById('bsr-' + fromId);
-  if (startTr) startTr.classList.add('shift-highlight');
-
-  toast('Now click the ↓ or ↑ button on the END row to complete the shift.');
-}
-
-async function bsInsertPlaceholder(afterId) {
-  try {
-    const fd = new FormData();
-    if (afterId !== null) fd.append('after_id', afterId);
-    const d = await fetch('/ui/binshow/log/insert', {method:'POST', body:fd}).then(r=>r.json());
-    if (d.ok) {
-      toast('Skip inserted. Auction numbers restamped.');
-      await loadBinLog();
-    } else {
-      toast(d.error || 'Insert failed', 'err');
+      toast('Row removed');
     }
   } catch(e) { toast('Network error','err'); }
 }

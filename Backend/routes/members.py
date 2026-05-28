@@ -111,3 +111,12 @@ def ui_add_guest(
         return r.json()
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+@router.get("/api/members")
+def api_members():
+    members = _fetch_members()
+
+    return {
+        "ok": True,
+        "members": members,
+    }

@@ -222,6 +222,45 @@ def ui_home(request: Request):
         ctx["items"] = raw_items
     return templates.TemplateResponse("index.html", ctx)
 
+@router.get("/api/inventory")
+def api_inventory():
+    active = shows.get_active()
+
+    if not active:
+        return {
+            "ok": False,
+            "items": [],
+            "error": "No active show",
+        }
+
+    raw_items = list_inventory(active.db_path)
+
+    for item in raw_items:
+        code = item["item_code"]
+
+        rating = (
+            "nsfw"
+            if code.startswith("N")
+            else "sfw"
+        )
+
+        media = get_media(
+            active.db_path,
+            code,
+            "watermarked",
+            rating,
+        )
+
+        item["preview_url"] = (
+            media["attachment_url"]
+            if media
+            else None
+        )
+
+    return {
+        "ok": True,
+        "items": raw_items,
+    }
 
 @router.post("/ui/publish")
 async def ui_publish(item_code: str = Form(...)):
@@ -348,6 +387,15 @@ def ui_binshow(request: Request):
     return templates.TemplateResponse("index.html", ctx)
 
 
+# ──  Insert listing in bin ───────────────────────────────────────────────────
+
+@router.post("/ui/binshow/log/insert")
+def ui_binshow_log_insert(after_id: int = Form(None)):
+    from Core.bin_queue import insert_placeholder
+    active = require_active_show()
+    new_id = insert_placeholder(after_id=after_id, show_db_path=active.db_path)
+    return {"ok": True, "inserted_id": new_id}
+
 @router.get("/ui/binshow/fuzzy")
 def ui_binshow_fuzzy(whatnot_name: str):
     """Fuzzy match a Whatnot username against verified Discord members via bot API."""
@@ -413,16 +461,17 @@ def ui_binshow_log():
 
 
 @router.delete("/ui/binshow/log/{auction_id}")
-def ui_binshow_log_delete(auction_id: int, remove_claim: bool = False, refund: bool = False):
+def ui_binshow_log_delete(auction_id: int, remove_claim: bool = False, refund: bool = True):
     """
     Remove a row from the auction log.
-    remove_claim=true: also removes the claim on the associated item (no refund for bin shows).
+    - remove_claim=true: also removes the claim on the associated item code
+    - refund=true: refunds the voucher when removing the claim (default true)
     """
     from Core.bin_queue import delete_auction_log_entry, restamp_auction_claim_numbers, get_auction_entry
     active = require_active_show()
 
     claim_removed = False
-    claim_error   = None
+    claim_error = None
 
     if remove_claim:
         row = get_auction_entry(auction_id)
@@ -430,7 +479,7 @@ def ui_binshow_log_delete(auction_id: int, remove_claim: bool = False, refund: b
             item_code = f"N{int(row['card_number']):03d}"
             try:
                 from Core.claim_service import remove_claim as rc
-                rc(active.db_path, item_code, refund=False, reason="Bin log row deleted")
+                rc(active.db_path, item_code, refund=refund, reason="Bin log row deleted")
                 claim_removed = True
             except Exception as e:
                 claim_error = str(e)
@@ -440,23 +489,6 @@ def ui_binshow_log_delete(auction_id: int, remove_claim: bool = False, refund: b
         restamp_auction_claim_numbers(active.db_path)
 
     return {"ok": True, "deleted": deleted, "claim_removed": claim_removed, "claim_error": claim_error}
-
-
-@router.post("/ui/binshow/log/insert")
-def ui_binshow_log_insert(after_id: int = Form(None)):
-    """Insert a placeholder row (other sale / cancellation) after the given auction id."""
-    from Core.bin_queue import insert_placeholder
-    active = require_active_show()
-    new_id = insert_placeholder(after_id=after_id, show_db_path=active.db_path)
-    return {"ok": True, "inserted_id": new_id}
-
-
-@router.post("/ui/binshow/log/{auction_id}/label")
-def ui_binshow_log_label(auction_id: int, label: str = Form(...)):
-    """Update the label/description on a placeholder row."""
-    from Core.bin_queue import update_placeholder_label
-    updated = update_placeholder_label(auction_id, label)
-    return {"ok": updated}
 
 
 @router.post("/ui/binshow/log/{auction_id}/assign")
@@ -1243,52 +1275,72 @@ def ui_settings(request: Request):
     return templates.TemplateResponse("index.html", ctx)
 
 
+# ── ADD these parameters to ui_settings_save() in Backend/routes/ui.py ──────
+# The existing function only accepts a fixed set of Form fields.
+# Replace the whole function with this version that accepts all keys:
+
 @router.post("/ui/settings/save")
 async def ui_settings_save(
-    WATCHER_PARENT_DIR:      str = Form(""),
-    WM_TEMPLATE_SFW:         str = Form(""),
-    WM_TEMPLATE_NSFW:        str = Form(""),
-    UPLOAD_THREAD_RAW_SFW:   str = Form(""),
-    UPLOAD_THREAD_WM_SFW:    str = Form(""),
-    UPLOAD_THREAD_RAW_NSFW:  str = Form(""),
-    UPLOAD_THREAD_WM_NSFW:   str = Form(""),
-    CATALOG_SFW_CHANNEL_ID:  str = Form(""),
-    CATALOG_NSFW_CHANNEL_ID: str = Form(""),
-    CLAIMS_SFW_CHANNEL_ID:   str = Form(""),
-    CLAIMS_NSFW_CHANNEL_ID:  str = Form(""),
-    WATCHER_POST_MODE:       str = Form(""),
+    # Watcher
+    WATCHER_PARENT_DIR:          str = Form(""),
+    WATCHER_AUTO_PUBLISH:        str = Form(""),
+    WATCHER_POST_MODE:           str = Form(""),
+    # Templates
+    WM_TEMPLATE_SFW:             str = Form(""),
+    WM_TEMPLATE_NSFW:            str = Form(""),
+    # Catalog channels
+    CATALOG_SFW_CHANNEL_ID:      str = Form(""),
+    CATALOG_NSFW_CHANNEL_ID:     str = Form(""),
+    # Claims channels
+    CLAIMS_SFW_CHANNEL_ID:       str = Form(""),
+    CLAIMS_NSFW_CHANNEL_ID:      str = Form(""),
+    # Upload threads
+    UPLOAD_THREAD_RAW_SFW:       str = Form(""),
+    UPLOAD_THREAD_WM_SFW:        str = Form(""),
+    UPLOAD_THREAD_RAW_NSFW:      str = Form(""),
+    UPLOAD_THREAD_WM_NSFW:       str = Form(""),
+    # Bin show
+    CLAIM_BOT_COMMANDS_CHANNEL_ID: str = Form(""),
+    # Trade
+    TRADE_CATEGORY_ID:           str = Form(""),
+    TRADE_ANNOUNCE_CHANNEL_ID:   str = Form(""),
+    TRADE_LOG_CHANNEL_ID:        str = Form(""),
+    # Verification
+    VERIFIED_ROLE_ID:            str = Form(""),
+    UNVERIFIED_ROLE_ID:          str = Form(""),
+    NEWCOMER_ROLE_ID:            str = Form(""),
+    VERIFY_CHANNEL_ID:           str = Form(""),
+    HONEYPOT_CHANNEL_ID:         str = Form(""),
 ):
     fields = {
-        "WATCHER_PARENT_DIR": WATCHER_PARENT_DIR, "WM_TEMPLATE_SFW": WM_TEMPLATE_SFW,
-        "WM_TEMPLATE_NSFW": WM_TEMPLATE_NSFW, "UPLOAD_THREAD_RAW_SFW": UPLOAD_THREAD_RAW_SFW,
-        "UPLOAD_THREAD_WM_SFW": UPLOAD_THREAD_WM_SFW, "UPLOAD_THREAD_RAW_NSFW": UPLOAD_THREAD_RAW_NSFW,
-        "UPLOAD_THREAD_WM_NSFW": UPLOAD_THREAD_WM_NSFW, "CATALOG_SFW_CHANNEL_ID": CATALOG_SFW_CHANNEL_ID,
-        "CATALOG_NSFW_CHANNEL_ID": CATALOG_NSFW_CHANNEL_ID, "CLAIMS_SFW_CHANNEL_ID": CLAIMS_SFW_CHANNEL_ID,
-        "CLAIMS_NSFW_CHANNEL_ID": CLAIMS_NSFW_CHANNEL_ID, "WATCHER_POST_MODE": WATCHER_POST_MODE,
+        "WATCHER_PARENT_DIR": WATCHER_PARENT_DIR,
+        "WATCHER_AUTO_PUBLISH": WATCHER_AUTO_PUBLISH,
+        "WATCHER_POST_MODE": WATCHER_POST_MODE,
+        "WM_TEMPLATE_SFW": WM_TEMPLATE_SFW,
+        "WM_TEMPLATE_NSFW": WM_TEMPLATE_NSFW,
+        "CATALOG_SFW_CHANNEL_ID": CATALOG_SFW_CHANNEL_ID,
+        "CATALOG_NSFW_CHANNEL_ID": CATALOG_NSFW_CHANNEL_ID,
+        "CLAIMS_SFW_CHANNEL_ID": CLAIMS_SFW_CHANNEL_ID,
+        "CLAIMS_NSFW_CHANNEL_ID": CLAIMS_NSFW_CHANNEL_ID,
+        "UPLOAD_THREAD_RAW_SFW": UPLOAD_THREAD_RAW_SFW,
+        "UPLOAD_THREAD_WM_SFW": UPLOAD_THREAD_WM_SFW,
+        "UPLOAD_THREAD_RAW_NSFW": UPLOAD_THREAD_RAW_NSFW,
+        "UPLOAD_THREAD_WM_NSFW": UPLOAD_THREAD_WM_NSFW,
+        "CLAIM_BOT_COMMANDS_CHANNEL_ID": CLAIM_BOT_COMMANDS_CHANNEL_ID,
+        "TRADE_CATEGORY_ID": TRADE_CATEGORY_ID,
+        "TRADE_ANNOUNCE_CHANNEL_ID": TRADE_ANNOUNCE_CHANNEL_ID,
+        "TRADE_LOG_CHANNEL_ID": TRADE_LOG_CHANNEL_ID,
+        "VERIFIED_ROLE_ID": VERIFIED_ROLE_ID,
+        "UNVERIFIED_ROLE_ID": UNVERIFIED_ROLE_ID,
+        "NEWCOMER_ROLE_ID": NEWCOMER_ROLE_ID,
+        "VERIFY_CHANNEL_ID": VERIFY_CHANNEL_ID,
+        "HONEYPOT_CHANNEL_ID": HONEYPOT_CHANNEL_ID,
     }
     for key, value in fields.items():
         if value.strip():
             set_key(str(ENV_PATH), key, value.strip())
     return {"ok": True}
 
-
-@router.get("/ui/show/reset_claims")
-@router.post("/ui/show/reset_claims")
-def ui_show_reset_claims():
-    """Wipe all claims, users, vouchers. Keep inventory and media intact."""
-    active = require_active_show()
-    try:
-        with db_session(active.db_path) as conn:
-            conn.execute("DELETE FROM claims")
-            conn.execute("DELETE FROM voucher_ledger")
-            conn.execute("DELETE FROM users")
-            conn.execute("UPDATE inventory_items SET status = 'available'")
-        # Clear auction log
-        from Core.bin_queue import clear_auction_log
-        clear_auction_log()
-        return {"ok": True, "message": "Claims, users, vouchers wiped. Inventory reset to available."}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
 
 
 # ── Server-side image upload ──────────────────────────────────────────────────
@@ -1412,3 +1464,394 @@ async def ui_upload(
             results.append({"ok": False, "error": str(e), "file": file.filename})
 
     return {"ok": True, "results": results}
+
+
+# ── React Admin JSON APIs ─────────────────────────────────────────────────────
+
+@router.get("/api/claims")
+def api_claims(include_removed: bool = False):
+    active = shows.get_active()
+    if not active:
+        return {"ok": False, "claims": [], "error": "No active show"}
+
+    claims = list_claims(active.db_path, include_removed=include_removed)
+    for c in claims:
+        code = c["item_code"]
+        rating = "nsfw" if code.startswith("N") else "sfw"
+        media = get_media(active.db_path, code, "watermarked", rating)
+        c["preview_url"] = media["attachment_url"] if media else None
+
+    return {"ok": True, "claims": claims}
+
+
+@router.get("/api/users")
+def api_users():
+    active = shows.get_active()
+    if not active:
+        return {"ok": False, "users": [], "error": "No active show"}
+
+    with db_session(active.db_path) as conn:
+        rows = conn.execute("""
+            SELECT
+              u.id, u.kind, u.discord_user_id, u.display_name, u.normalized_name, u.created_at,
+              COUNT(c.id) AS claims,
+              COUNT(c.id) AS cards_owned
+            FROM users u
+            LEFT JOIN claims c ON c.user_id = u.id AND c.removed_at IS NULL
+            GROUP BY u.id
+            ORDER BY
+              CASE u.kind WHEN 'discord' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END,
+              LOWER(u.display_name) ASC
+        """).fetchall()
+
+        users = []
+        for r in rows:
+            u = dict(r)
+            u["balance"] = get_balance(active.db_path, u["id"])
+            u["merge_candidate"] = None
+
+            if u.get("kind") in ("pending", "guest") and u.get("normalized_name"):
+                candidate = conn.execute(
+                    """
+                    SELECT display_name, discord_user_id
+                    FROM users
+                    WHERE kind = 'discord'
+                      AND discord_user_id IS NOT NULL
+                      AND normalized_name = ?
+                    LIMIT 1
+                    """,
+                    (u["normalized_name"],),
+                ).fetchone()
+                if candidate:
+                    u["merge_candidate"] = candidate["display_name"]
+
+            users.append(u)
+
+    return {"ok": True, "users": users}
+
+
+@router.get("/api/binshow/state")
+def api_binshow_state():
+    active = shows.get_active()
+    if not active:
+        return {
+            "ok": False,
+            "rows": [],
+            "pending_sales": [],
+            "watcher": {"running": False, "processing": False, "lastEvent": "No active show"},
+            "error": "No active show",
+        }
+
+    from Core.bin_queue import get_auction_log, list_pending_sales
+
+    rows = get_auction_log()
+    for row in rows:
+        item_code = f"N{int(row['card_number']):03d}"
+        row["item_code"] = item_code
+        rating = "nsfw"
+        media = get_media(active.db_path, item_code, "watermarked", rating)
+        row["preview_url"] = media["attachment_url"] if media else None
+
+    watcher = {"running": False, "processing": False, "lastEvent": "Watcher status unavailable"}
+    try:
+        from Watcher.watcher_logger import is_alive
+        flag_file = REPO_ROOT / "logs" / "watcher_process.flag"
+        processing = flag_file.exists() and flag_file.read_text().strip() == "1"
+        watcher = {
+            "running": bool(is_alive()),
+            "processing": bool(processing),
+            "lastEvent": "Watcher processing" if processing else "Watcher idle",
+        }
+    except Exception as e:
+        watcher["lastEvent"] = f"Watcher status unavailable: {e}"
+
+    return {
+        "ok": True,
+        "rows": rows,
+        "pending_sales": list_pending_sales(limit=25, unmatched_only=True),
+        "watcher": watcher,
+ 
+ 
+   }
+
+#-- Settings
+
+# 1. Settings needs a JSON endpoint to READ the current .env values
+# Add alongside /ui/settings:
+
+@router.get("/ui/settings/env")
+def ui_settings_env():
+    """Return current .env values as JSON for the React settings page."""
+    return {"ok": True, "env": _env()}
+
+
+
+#-- History
+
+# 2. History needs JSON endpoints (currently only serves Jinja)
+# Add alongside /ui/history:
+
+@router.get("/api/history/list")
+def api_history_list():
+    """List all past shows as JSON."""
+    return {"ok": True, "shows": _list_past_shows()}
+
+
+@router.get("/api/history/show")
+def api_history_show(show_id: str):
+    """Return inventory, claims, and users for a past show as JSON."""
+    db_path = REPO_ROOT / "DB" / "shows" / show_id / "show.db"
+
+    if not db_path.exists():
+        return {"ok": False, "error": f"Show '{show_id}' not found"}
+
+    try:
+        from Core.db import ensure_db
+        ensure_db(db_path)
+
+        raw_items = list_inventory(db_path)
+        for item in raw_items:
+            code   = item["item_code"]
+            rating = "nsfw" if code.startswith("N") else "sfw"
+            media  = get_media(db_path, code, "watermarked", rating)
+            item["preview_url"] = media["attachment_url"] if media else None
+
+        claims = list_claims(db_path, include_removed=True)
+
+        with db_session(db_path) as conn:
+            user_rows = conn.execute(
+                """
+                SELECT u.id, u.kind, u.discord_user_id, u.display_name, u.created_at,
+                       COUNT(c.id) AS claims
+                FROM users u
+                LEFT JOIN claims c ON c.user_id = u.id AND c.removed_at IS NULL
+                GROUP BY u.id
+                ORDER BY LOWER(u.display_name)
+                """
+            ).fetchall()
+            users = [dict(r) for r in user_rows]
+
+        return {
+            "ok":     True,
+            "show_id": show_id,
+            "items":  raw_items,
+            "claims": claims,
+            "users":  users,
+        }
+
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+# 1. Template upload endpoint — saves to server and updates .env path
+@router.post("/ui/settings/template/upload")
+async def ui_template_upload(rating: str = Form(...), file: UploadFile = File(...)):
+    env = _env()
+    parent = Path(env.get("WATCHER_PARENT_DIR", "/home/v3bot"))
+    templates_dir = parent / "templates"
+    templates_dir.mkdir(parents=True, exist_ok=True)
+
+    ext      = Path(file.filename).suffix.lower() or ".png"
+    filename = f"{rating}{ext}"
+    dest     = templates_dir / filename
+
+    with open(dest, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    # Update .env so watcher picks up new path
+    env_key = "WM_TEMPLATE_SFW" if rating == "sfw" else "WM_TEMPLATE_NSFW"
+    set_key(str(ENV_PATH), env_key, str(dest))
+
+    return {"ok": True, "path": str(dest)}
+
+
+# 2. Template preview endpoint — serves the current template image
+@router.get("/ui/settings/template/preview")
+def ui_template_preview(rating: str = "sfw"):
+    from fastapi.responses import FileResponse
+    env = _env()
+    key = "WM_TEMPLATE_SFW" if rating == "sfw" else "WM_TEMPLATE_NSFW"
+    path = Path(env.get(key, ""))
+    if not path.exists():
+        from fastapi import HTTPException
+        raise HTTPException(404, "Template not found")
+    return FileResponse(str(path))
+
+# ── SHOW API ──────────────────────────────────────────────────────────────────
+
+@router.get("/shows/active")
+def api_shows_active():
+    active = shows.get_active()
+    if not active:
+        return {"ok": False, "show_id": None, "error": "No active show"}
+    try:
+        from Core.show_settings_service import get_setting
+        show_mode = get_setting(active.db_path, "show_mode") or "standard"
+    except Exception:
+        show_mode = "standard"
+    return {"ok": True, "show_id": active.show_id, "db_path": str(active.db_path), "show_mode": show_mode}
+
+
+@router.get("/shows/mode")
+def api_shows_mode_get():
+    active = shows.get_active()
+    if not active:
+        return {"ok": False, "mode": None, "error": "No active show"}
+    from Core.show_settings_service import get_setting
+    mode = get_setting(active.db_path, "show_mode") or "standard"
+    return {"ok": True, "mode": mode}
+
+
+@router.post("/shows/mode")
+def api_shows_mode_set(mode: str):
+    if mode not in ("standard", "bin"):
+        return {"ok": False, "error": "Mode must be 'standard' or 'bin'"}
+    active = shows.get_active()
+    if not active:
+        return {"ok": False, "error": "No active show"}
+    from Core.show_settings_service import set_setting
+    set_setting(active.db_path, "show_mode", mode)
+    return {"ok": True, "mode": mode}
+
+
+# ── TRADE API ─────────────────────────────────────────────────────────────────
+
+@router.get("/api/trades")
+def api_trades():
+    active = shows.get_active()
+    if not active:
+        return {"ok": False, "error": "No active show", "channels": [], "listings": [], "offers": [], "completed": []}
+
+    try:
+        with db_session(active.db_path) as conn:
+
+            channels = conn.execute("""
+                SELECT tc.user_id, tc.channel_id, tc.created_at, u.display_name
+                FROM trade_user_channels tc
+                LEFT JOIN users u ON u.discord_user_id = tc.user_id
+                ORDER BY tc.created_at DESC
+            """).fetchall()
+
+            listing_cards = conn.execute("""
+                SELECT tl.listing_id, tl.owner_user_id, tl.looking_for, tl.status, tl.created_at,
+                       u.display_name AS owner_name, tlc.item_code,
+                       (SELECT ma.attachment_url FROM media_assets ma
+                        WHERE ma.item_code = tlc.item_code AND ma.variant = 'watermarked' LIMIT 1) AS image_url
+                FROM trade_listings tl
+                LEFT JOIN users u ON u.discord_user_id = tl.owner_user_id
+                LEFT JOIN trade_listing_cards tlc ON tlc.listing_id = tl.listing_id
+                WHERE tl.status = 'active'
+                ORDER BY tl.created_at DESC
+            """).fetchall()
+
+            listings_map = {}
+            for r in listing_cards:
+                lid = r["listing_id"]
+                if lid not in listings_map:
+                    listings_map[lid] = {"listing_id": lid, "owner_user_id": r["owner_user_id"],
+                        "owner_name": r["owner_name"], "looking_for": r["looking_for"],
+                        "status": r["status"], "created_at": r["created_at"], "cards": []}
+                if r["item_code"]:
+                    listings_map[lid]["cards"].append({"item_code": r["item_code"], "image_url": r["image_url"]})
+
+            offer_cards = conn.execute("""
+                SELECT o.offer_id, o.sender_user_id, o.receiver_user_id, o.listing_id, o.status, o.created_at,
+                       su.display_name AS sender_name, ru.display_name AS receiver_name,
+                       oc.item_code,
+                       (SELECT ma.attachment_url FROM media_assets ma
+                        WHERE ma.item_code = oc.item_code AND ma.variant = 'watermarked' LIMIT 1) AS image_url
+                FROM trade_offers o
+                LEFT JOIN users su ON su.discord_user_id = o.sender_user_id
+                LEFT JOIN users ru ON ru.discord_user_id = o.receiver_user_id
+                LEFT JOIN trade_offer_cards oc ON oc.offer_id = o.offer_id
+                WHERE o.status = 'pending'
+                ORDER BY o.created_at DESC
+            """).fetchall()
+
+            offers_map = {}
+            for r in offer_cards:
+                oid = r["offer_id"]
+                if oid not in offers_map:
+                    offers_map[oid] = {"offer_id": oid, "sender_user_id": r["sender_user_id"],
+                        "sender_name": r["sender_name"], "receiver_user_id": r["receiver_user_id"],
+                        "receiver_name": r["receiver_name"], "listing_id": r["listing_id"],
+                        "status": r["status"], "created_at": r["created_at"], "cards": []}
+                if r["item_code"]:
+                    offers_map[oid]["cards"].append({"item_code": r["item_code"], "image_url": r["image_url"]})
+
+            completed_cards = conn.execute("""
+                SELECT o.offer_id, o.sender_user_id, o.receiver_user_id, o.status, o.created_at, o.resolved_at,
+                       su.display_name AS sender_name, ru.display_name AS receiver_name,
+                       oc.item_code,
+                       (SELECT ma.attachment_url FROM media_assets ma
+                        WHERE ma.item_code = oc.item_code AND ma.variant = 'watermarked' LIMIT 1) AS image_url
+                FROM trade_offers o
+                LEFT JOIN users su ON su.discord_user_id = o.sender_user_id
+                LEFT JOIN users ru ON ru.discord_user_id = o.receiver_user_id
+                LEFT JOIN trade_offer_cards oc ON oc.offer_id = o.offer_id
+                WHERE o.status = 'accepted'
+                ORDER BY o.resolved_at DESC LIMIT 100
+            """).fetchall()
+
+            completed_map = {}
+            for r in completed_cards:
+                oid = r["offer_id"]
+                if oid not in completed_map:
+                    completed_map[oid] = {"offer_id": oid, "sender_user_id": r["sender_user_id"],
+                        "sender_name": r["sender_name"], "receiver_user_id": r["receiver_user_id"],
+                        "receiver_name": r["receiver_name"], "status": r["status"],
+                        "created_at": r["created_at"], "resolved_at": r["resolved_at"], "cards": []}
+                if r["item_code"]:
+                    completed_map[oid]["cards"].append({"item_code": r["item_code"], "image_url": r["image_url"]})
+
+        return {"ok": True, "channels": [dict(r) for r in channels],
+                "listings": list(listings_map.values()), "offers": list(offers_map.values()),
+                "completed": list(completed_map.values())}
+
+    except Exception as e:
+        return {"ok": False, "error": str(e), "channels": [], "listings": [], "offers": [], "completed": []}
+
+
+@router.post("/api/trades/refresh_all")
+def api_trades_refresh_all():
+    try:
+        r = requests.post(f"{BOT_API}/trade/refresh_all", timeout=30)
+        return r.json()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@router.post("/api/trades/refresh_user")
+def api_trades_refresh_user(discord_user_id: str = Form(...)):
+    try:
+        r = requests.post(f"{BOT_API}/trade/refresh_user", params={"discord_user_id": discord_user_id}, timeout=15)
+        return r.json()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@router.post("/api/trades/open_channel")
+def api_trades_open_channel(discord_user_id: str = Form(...)):
+    try:
+        r = requests.post(f"{BOT_API}/trade/open_for_user", params={"discord_user_id": discord_user_id}, timeout=15)
+        return r.json()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@router.post("/api/trades/close_channel")
+def api_trades_close_channel(discord_user_id: str = Form(...)):
+    try:
+        r = requests.post(f"{BOT_API}/trade/close_channel", params={"discord_user_id": discord_user_id}, timeout=15)
+        return r.json()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@router.post("/api/trades/close_all")
+def api_trades_close_all():
+    try:
+        r = requests.post(f"{BOT_API}/trade/close_channels", timeout=60)
+        return r.json()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
