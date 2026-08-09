@@ -19,6 +19,10 @@ from fastapi.responses import JSONResponse
 
 from Discord.bot_instance import client
 from Discord.core_client import CoreClient
+from Core.restock_config_service import (
+    mute_item, unmute_item, list_muted_items,
+    add_watched_series, remove_watched_series, list_watched_series,
+)
 from Discord.ui_components import build_claim_view
 import Discord.member_cache as member_cache
 
@@ -48,6 +52,7 @@ VERIFY_CHANNEL_ID       = get_int_env("VERIFY_CHANNEL_ID", 0)
 VERIFIED_ROLE_ID        = get_int_env("VERIFIED_ROLE_ID", 0)
 UNVERIFIED_ROLE_ID      = get_int_env("UNVERIFIED_ROLE_ID", 0)
 NEWCOMER_ROLE_ID        = get_int_env("NEWCOMER_ROLE_ID", 0)
+MEMBER_ROLE_ID          = get_int_env("MEMBER_ROLE_ID")
 HONEYPOT_CHANNEL_ID     = get_int_env("HONEYPOT_CHANNEL_ID", 0)
 UPLOAD_THREAD_RAW_SFW   = get_int_env("UPLOAD_THREAD_RAW_SFW")
 UPLOAD_THREAD_WM_SFW    = get_int_env("UPLOAD_THREAD_WM_SFW")
@@ -464,10 +469,25 @@ register_all(
     catalog_channel_id_for=catalog_channel_id_for,
 )
 
+# ── Role promotion (newcomer → member) ───────────────────────────────
+from Discord.role_promotion import register_role_promotion
+_role_promotion_loop = register_role_promotion(client, tree, NEWCOMER_ROLE_ID, MEMBER_ROLE_ID)
+
 
 # ── Bot internal API (port 8001) ──────────────────────────────────────────────
 
 app = FastAPI(title="V3 Bot Internal API")
+
+@app.get("/test_upload")
+def test_upload():
+    import requests as _r
+    from dotenv import dotenv_values as _dv
+    ev = _dv("/home/v3bot/Discord/.env")
+    token = ev.get("DISCORD_TOKEN","")
+    r = _r.get("https://discord.com/api/v10/users/@me",
+                headers={"Authorization": f"Bot {token}"}, timeout=10)
+    return {"status": r.status_code, "ok": r.ok, "token_len": len(token)}
+
 _discord_loop = None  # Set in on_ready once Discord connects
 
 
@@ -645,22 +665,32 @@ def api_upload_media(
     thread_id: str = FormField(...),
     file: UploadFile = File(...),
 ):
-    import asyncio, io
+    import requests as _req, os as _os
+    print("[UPLOAD] start", flush=True)
     raw_bytes = file.file.read()
     filename  = file.filename
-
-    async def _send():
-        ch = client.get_channel(int(thread_id)) or await client.fetch_channel(int(thread_id))
-        if getattr(ch, "archived", False):
-            await ch.edit(archived=False)
-        msg = await ch.send(file=discord.File(fp=io.BytesIO(raw_bytes), filename=filename))
-        att = msg.attachments[0]
-        # Return URL to caller — backend registers it to avoid deadlock
-        return {"ok": True, "attachment_url": att.url, "filename": att.filename,
-                "content_type": att.content_type or "", "message_id": msg.id}
-
-    future = asyncio.run_coroutine_threadsafe(_send(), _discord_loop)
-    return future.result(timeout=30)
+    print(f"[UPLOAD] file read ok, size={len(raw_bytes)}, thread={thread_id}", flush=True)
+    from dotenv import dotenv_values as _dv
+    _ev = _dv("/home/v3bot/Discord/.env")
+    token = _ev.get("DISCORD_TOKEN", "") or _os.getenv("DISCORD_TOKEN", "")
+    print(f"[UPLOAD] token_len={len(token)}", flush=True)
+    try:
+        r = _req.post(
+            f"https://discord.com/api/v10/channels/{thread_id}/messages",
+            headers={"Authorization": f"Bot {token}"},
+            files={"files[0]": (filename, raw_bytes)},
+            timeout=30,
+        )
+        print(f"[UPLOAD] response={r.status_code}", flush=True)
+    except Exception as e:
+        print(f"[UPLOAD] request failed: {e}", flush=True)
+        return {"ok": False, "error": str(e)}
+    if not r.ok:
+        return {"ok": False, "error": r.text}
+    data = r.json()
+    att  = data["attachments"][0]
+    return {"ok": True, "attachment_url": att["url"], "filename": att["filename"],
+            "content_type": att.get("content_type", ""), "message_id": data["id"]}
 
 
 @app.post("/publish")
@@ -727,6 +757,7 @@ def api_claims_summary(payload: dict):
     from Core.show_service import require_active_show
     from Core.claim_service import list_claims
     from Core.media_service import get_media
+
 
     rating = (payload.get("rating") or "nsfw").lower()
 
@@ -911,6 +942,10 @@ async def on_ready():
     from Discord.bin_listener import register_bin_listener
     register_bin_listener(client, core)
     print("✅ Bin listener registered")
+    # Start role promotion sweep (newcomer -> member)
+    if not _role_promotion_loop.is_running():
+        _role_promotion_loop.start()
+    print("✅ Role promotion loop started")
 
     # Register persistent views so buttons survive restarts
     try:
@@ -1164,6 +1199,118 @@ def api_trade_open_for_user(discord_user_id: str):
     asyncio.run_coroutine_threadsafe(_open(), _discord_loop)
     return {"ok": True}
 
+@app.post("/restock_alert")
+async def restock_alert(payload: dict):
+    import asyncio
+
+    channel_id = get_int_env("RESTOCK_CHANNEL_ID", 0)
+    role_id = get_int_env("RESTOCK_ROLE_ID", 0)
+
+    if not channel_id:
+        print("RESTOCK_CHANNEL_ID not set, dropping alert")
+        return {"ok": False, "error": "no channel configured"}
+
+    channel = client.get_channel(channel_id)
+
+    async def send():
+        nonlocal channel
+        if channel is None:
+            channel = await client.fetch_channel(channel_id)
+
+        embed = discord.Embed(
+            title=payload.get("name", "Unknown item"),
+            description="🔔 Restock Alert",
+            color=discord.Color.green(),
+        )
+        if payload.get("price"):
+            embed.add_field(name="Price", value=payload["price"], inline=True)
+        if payload.get("product_id"):
+            embed.add_field(name="Item Code", value=payload["product_id"], inline=True)
+        if payload.get("url"):
+            embed.url = payload["url"]
+        if payload.get("image_url"):
+            embed.set_image(url=payload["image_url"])
+
+        embed.set_footer(text="ShowForge Restock Watcher")
+        embed.timestamp = discord.utils.utcnow()
+        
+        content = f"<@&{role_id}>" if role_id else None
+
+        return await channel.send(content=content, embed=embed)
+
+    future = asyncio.run_coroutine_threadsafe(send(), client.loop)
+    msg = future.result()
+    return {"ok": True, "message_id": msg.id}
+
+@tree.command(name="restock_mute", description="Stop alerting on a specific restock item (staff)")
+@app_commands.describe(item_code="Product code to mute, e.g. F2767007001")
+@app_commands.default_permissions(manage_guild=True)
+async def restock_mute(interaction: discord.Interaction, item_code: str):
+    result = mute_item(item_code, muted_by=interaction.user.display_name)
+    await interaction.response.send_message(
+        f"🔇 Muted `{result['product_id']}` — restock alerts for this item are now suppressed.",
+        ephemeral=True,
+    )
+
+
+@tree.command(name="restock_unmute", description="Resume alerting on a previously muted item (staff)")
+@app_commands.describe(item_code="Product code to unmute")
+@app_commands.default_permissions(manage_guild=True)
+async def restock_unmute(interaction: discord.Interaction, item_code: str):
+    result = unmute_item(item_code)
+    if result["ok"]:
+        await interaction.response.send_message(f"🔔 Unmuted `{result['product_id']}`.", ephemeral=True)
+    else:
+        await interaction.response.send_message(f"`{result['product_id']}` wasn't muted.", ephemeral=True)
+
+
+@tree.command(name="restock_muted_list", description="Show all currently muted restock items (staff)")
+@app_commands.default_permissions(manage_guild=True)
+async def restock_muted_list(interaction: discord.Interaction):
+    items = list_muted_items()
+    if not items:
+        await interaction.response.send_message("No items are currently muted.", ephemeral=True)
+        return
+
+    lines = [f"`{i['product_id']}`" + (f" — {i['label']}" if i.get("label") else "") for i in items]
+    await interaction.response.send_message("**Muted items:**\n" + "\n".join(lines), ephemeral=True)
+
+
+@tree.command(name="restock_watch", description="Add a p-bandai series/search page to monitor (staff)")
+@app_commands.describe(url="Full p-bandai series/search URL", label="Optional friendly name")
+@app_commands.default_permissions(manage_guild=True)
+async def restock_watch(interaction: discord.Interaction, url: str, label: str = None):
+    result = add_watched_series(url, label=label, added_by=interaction.user.display_name)
+    if result["ok"]:
+        await interaction.response.send_message(f"✅ Now watching: {label or url}", ephemeral=True)
+    else:
+        await interaction.response.send_message(f"❌ {result['error']}", ephemeral=True)
+
+
+@tree.command(name="restock_watched_list", description="Show all series currently being monitored (staff)")
+@app_commands.default_permissions(manage_guild=True)
+async def restock_watched_list(interaction: discord.Interaction):
+    series = list_watched_series()
+    if not series:
+        await interaction.response.send_message("No series are currently being watched.", ephemeral=True)
+        return
+
+    lines = [f"`#{s['id']}` — {s.get('label') or s['url']}" for s in series]
+    await interaction.response.send_message("**Watched series:**\n" + "\n".join(lines), ephemeral=True)
+
+
+@tree.command(name="restock_unwatch", description="Stop monitoring a series (staff)")
+@app_commands.describe(series_id="The #ID shown in /restock_watched_list")
+@app_commands.default_permissions(manage_guild=True)
+async def restock_unwatch(interaction: discord.Interaction, series_id: int):
+    result = remove_watched_series(series_id)
+    if result["ok"]:
+        await interaction.response.send_message(f"✅ Removed series #{series_id}.", ephemeral=True)
+    else:
+        await interaction.response.send_message(f"No series found with #{series_id}.", ephemeral=True)
+
+
+# Entry point
 
 # Entry point
 if __name__ == "__main__":
